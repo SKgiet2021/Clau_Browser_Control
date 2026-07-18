@@ -1,0 +1,30 @@
+# ---- OS junk ----
+.DS_Store
+**/.DS_Store
+Thumbs.db
+
+# ---- runtime state (NEVER commit — may contain prompts / local state) ----
+build/brain/brain.log
+build/brain/*.log
+build/brain/brain.pid
+build/brain/*.pid
+build/brain/scroll_bin          # compiled Swift helper (rebuilt on first use)
+
+# ---- secrets (defense-in-depth; keys actually live in chrome.storage at runtime) ----
+.env
+.env.*
+*.key
+*.pem
+secrets.json
+**/apikeys*.json
+
+# ---- editor / tooling state ----
+.claude/
+**/.claude/
+.vscode/
+.idea/
+node_modules/
+
+# ---- misc ----
+*.swp
+*.tmp
