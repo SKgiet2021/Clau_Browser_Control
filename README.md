@@ -8,6 +8,23 @@ Reads pages · clicks · types · navigates · fills forms · solves tasks — a
 
 <sub>Anthropic's "Claude in Chrome" body · Antigravity's invisible hands · your key · a hand-built Apple-style UI</sub>
 
+<br/>
+
+<table>
+  <tr>
+    <td width="25%"><img src="docs/screenshots/01-new-chat.png" alt="New chat — glass composer, quick-prompt chips, drifting glow orbs"/></td>
+    <td width="25%"><img src="docs/screenshots/02-chat.png" alt="Conversation — avatars, glass bubbles, tool chip, streaming"/></td>
+    <td width="25%"><img src="docs/screenshots/03-history.png" alt="History — glass conversation cards"/></td>
+    <td width="25%"><img src="docs/screenshots/04-providers.png" alt="Providers — liquid toggle, model manager"/></td>
+  </tr>
+  <tr>
+    <td align="center"><sub><b>New chat</b></sub></td>
+    <td align="center"><sub><b>Conversation</b></sub></td>
+    <td align="center"><sub><b>History</b></sub></td>
+    <td align="center"><sub><b>Providers</b></sub></td>
+  </tr>
+</table>
+
 </div>
 
 ---
