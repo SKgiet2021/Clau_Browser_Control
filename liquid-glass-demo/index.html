@@ -1,0 +1,1075 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Claude AI — Liquid Glass</title>
+<style>
+  :root {
+    --glass-tint: rgba(217, 217, 217, 0.16);      /* Figma: d9d9d9 @ 20% */
+    --glass-rim: rgba(255, 255, 255, 0.55);
+    --glass-blur: 9px;
+    --spring: cubic-bezier(.32, 1.72, .46, .9);   /* iOS gel spring */
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #1a1a1e;
+    /* real font if installed locally (it is, if Figma renders it) → else Georgia */
+    font-family: 'Anthropic Serif Display', 'Anthropic Serif', 'Copernicus', 'Tiempos Text', 'Georgia', serif;
+    overflow: hidden;
+    -webkit-user-select: none; user-select: none;
+  }
+
+  /* ── Frame: Figma gradient black → #7a8a5e (49.5%) → #2e2e2e ── */
+  .phone {
+    position: relative;
+    width: 440px;
+    height: 956px;
+    border-radius: 33px;
+    overflow: hidden;
+    background: linear-gradient(180deg, #000 0%, #7a8a5e 49.519%, #2e2e2e 100%);
+    box-shadow: 0 40px 100px rgba(0,0,0,0.7);
+  }
+  @media (max-height: 1000px) { .phone { transform: scale(calc(100vh / 1010)); } }
+
+  /* perfectly round glowing spheres — edge is the border-radius circle itself,
+     softened by uniform blur so it can never go egg-shaped */
+  .orb {
+    position: absolute;
+    border-radius: 50%;
+    filter: blur(16px);
+    pointer-events: none;
+    animation: drift 16s ease-in-out infinite alternate;
+  }
+  .orb.o1 { width: 170px; height: 170px; left: -50px; top: 130px;
+            background: radial-gradient(circle at 32% 30%, #ffe3b3, #d97757 58%, #8a3b22 100%); }
+  .orb.o2 { width: 120px; height: 120px; right: -30px; top: 700px;
+            background: radial-gradient(circle at 32% 30%, #ffffff, #b7d97a 58%, #5d7a2e 100%);
+            animation-delay: -8s; }
+  .orb.o3 { width: 200px; height: 200px; right: -60px; top: 320px;
+            background: radial-gradient(circle at 34% 32%, #ecd0ff, #a05cd9 58%, #55257a 100%);
+            opacity: .6; animation-delay: -4s; animation-duration: 19s; }
+  .orb.o4 { width: 150px; height: 150px; left: -30px; top: 520px;
+            background: radial-gradient(circle at 34% 32%, #ffd0d9, #d94f6b 58%, #7a2036 100%);
+            opacity: .55; animation-delay: -12s; animation-duration: 22s; }
+  @keyframes drift {
+    0%   { transform: translate(0, 0) scale(1); }
+    50%  { transform: translate(40px, 70px) scale(1.08); }
+    100% { transform: translate(70px, 110px) scale(.96); }
+  }
+
+  /* ═══════════ LIQUID GLASS MATERIAL ═══════════ */
+  .glass {
+    position: absolute;
+    isolation: isolate;
+    transition: transform .4s var(--spring);
+  }
+  .glass::before {
+    content: '';
+    position: absolute; inset: 0;
+    border-radius: inherit;
+    z-index: 0;
+    -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(170%);
+    backdrop-filter: blur(var(--glass-blur)) saturate(170%) url(#liquid-lens);
+    background: var(--glass-tint);
+  }
+  @supports not (backdrop-filter: url(#f)) {
+    .glass::before { backdrop-filter: blur(var(--glass-blur)) saturate(170%); }
+  }
+  .glass::after {
+    content: '';
+    position: absolute; inset: 0;
+    border-radius: inherit;
+    z-index: 1;
+    pointer-events: none;
+    box-shadow:
+      inset 2px 2px 1px -1.5px var(--glass-rim),
+      inset -1.5px -1.5px 1px -1.5px rgba(255,255,255,0.35),
+      inset 0 0 12px rgba(255,255,255,0.06),
+      0 10px 30px rgba(0,0,0,0.18);
+  }
+  .glass > * { position: relative; z-index: 2; }
+  .glass.pressable { cursor: pointer; }
+  .glass.pressable:active { transform: scale(.94); }
+
+  img { object-fit: contain; }
+
+  /* ═══════════ SCREENS ═══════════ */
+  .screen {
+    position: absolute; inset: 0;
+    opacity: 0; pointer-events: none;
+    transition: opacity .28s ease, transform .28s ease;
+    transform: scale(.985);
+  }
+  .screen.active { opacity: 1; pointer-events: auto; transform: none; }
+
+  /* ═══════════ SHARED HEADER ═══════════ */
+  .logo-blob {
+    left: 35px; top: 39px; width: 74px; height: 75px;
+    border-radius: 47px;
+    display: flex; align-items: center; justify-content: center;
+    z-index: 30;
+  }
+  .logo-blob img { width: 56px; height: 52px; }
+
+  .new-chat-btn {
+    position: absolute; left: 355px; top: 57px; width: 40px; height: 40px;
+    background: none; border: none; cursor: pointer; z-index: 30;
+    transition: transform .4s var(--spring);
+  }
+  .new-chat-btn:active { transform: scale(.85); }
+  .new-chat-btn img { width: 100%; height: 100%; }
+
+  /* ── Liquid segmented toggle (Chat / History) ──
+     track: 142,62 156×29 r47 · lens: 94×35, overhangs track edges */
+  .seg {
+    position: absolute; left: 142px; top: 62px; width: 156px; height: 29px;
+    border-radius: 47px;
+    z-index: 30;
+    background: rgba(217,217,217,0.12);
+    box-shadow: inset 0 1px 3px rgba(0,0,0,.25), inset 0 0 0 .5px rgba(255,255,255,.12);
+  }
+  .seg .lens {
+    left: -8px; top: -3px; width: 94px; height: 35px;
+    border-radius: 47px;
+    --glass-tint: rgba(255,255,255,0.13);
+    --glass-rim: rgba(255,255,255,0.7);
+    transition: left .5s var(--spring), transform .4s var(--spring);
+    will-change: left, transform;
+  }
+  .seg[data-sel="1"] .lens { left: 70px; }
+  .seg .lens.gel { animation: gel .5s ease; }
+  @keyframes gel {                        /* the iOS squish-stretch */
+    0%   { transform: scale(1,1); }
+    35%  { transform: scale(1.22,.8); }
+    65%  { transform: scale(.94,1.05); }
+    100% { transform: scale(1,1); }
+  }
+  .seg .opt {
+    position: absolute; top: 0; height: 29px; width: 78px;
+    display: flex; align-items: center; justify-content: center;
+    color: #fff; font-size: 13px; cursor: pointer; z-index: 2;
+    transition: font-size .3s, opacity .3s;
+    opacity: .75;
+  }
+  .seg .opt:nth-child(2) { left: 0; }
+  .seg .opt:nth-child(3) { right: 0; }
+  .seg[data-sel="0"] .opt:nth-child(2),
+  .seg[data-sel="1"] .opt:nth-child(3) {
+    font-size: 15px; font-weight: 600; opacity: 1;
+  }
+
+  /* providers header pill */
+  .providers-pill {
+    left: 164px; top: 58px; width: 112px; height: 37px; border-radius: 47px;
+    display: flex; align-items: center; justify-content: center;
+    color: #fff; font-size: 15px; font-weight: 500;
+  }
+
+  /* ═══════════ NEW CHAT SCREEN ═══════════ */
+  .clawd-hero { position: absolute; left: 184px; top: 214px; width: 72px; height: 72px;
+                animation: floaty 4s ease-in-out infinite alternate; }
+  @keyframes floaty { from { transform: translateY(0) } to { transform: translateY(-10px) } }
+  .hero-title {
+    position: absolute; left: 0; right: 0; top: 319px;
+    text-align: center; color: #fff; font-size: 20px; font-weight: 500;
+  }
+  .chip {
+    height: 29px; border-radius: 47px;
+    display: flex; align-items: center; justify-content: center;
+    color: #fff; font-size: 13px; font-weight: 500;
+  }
+  .chip.c1 { left: 59px;  top: 372px; width: 156px; }
+  .chip.c2 { left: 225px; top: 372px; width: 156px; }
+  .chip.c3 { left: 162px; top: 415px; width: 116px; }
+
+  /* ═══════════ INPUT BAR (shared new-chat + chat) ═══════════ */
+  .inputbar {
+    left: 30px; top: 811px; width: 380px; height: 85px;
+    border-radius: 21px;
+    --glass-tint: rgba(255,255,255,0.06);
+    z-index: 20;
+  }
+  .inputbar .prompt {
+    position: absolute; left: 31px; top: 20px; width: 260px;   /* Figma: y831 */
+    background: none; border: none; outline: none;
+    color: #fff; font-size: 13px; font-family: inherit;
+  }
+  .inputbar .prompt::placeholder { color: rgba(255,255,255,0.4); }
+  .inputbar .row {
+    position: absolute; left: 30px; right: 14px; bottom: 11px;
+    display: flex; align-items: center; gap: 4px;
+  }
+  .icon-btn {
+    background: none; border: none; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    opacity: .85; transition: opacity .15s, transform .4s var(--spring);
+  }
+  .icon-btn:hover { opacity: 1; }
+  .icon-btn:active { transform: scale(.82); }
+
+  /* bare glyph icon buttons — screen-grab & file upload */
+  .icon-glyph {
+    background: none; border: none; cursor: pointer; padding: 0;
+    display: flex; align-items: center; justify-content: center;
+    opacity: .9;
+    transition: opacity .15s, transform .4s var(--spring);
+  }
+  .icon-glyph:hover { opacity: 1; }
+  .icon-glyph:active { transform: scale(.82); }
+  .icon-glyph svg {
+    filter: drop-shadow(0 1px 3px rgba(0,0,0,.4));
+  }
+
+  .model-sel {
+    margin-left: auto; display: flex; align-items: baseline; gap: 6px;
+    cursor: pointer; position: relative;
+  }
+  .model-sel .m  { color: #fff; font-size: 13px; font-weight: 500; }
+  .model-sel .fx { color: rgba(255,255,255,.5); font-size: 10px; font-weight: 500; }
+
+  /* liquid glass dropdown */
+  .dropdown {
+    position: absolute; bottom: 34px; right: -10px; width: 132px;
+    border-radius: 16px;
+    --glass-tint: rgba(30,30,30,0.35);
+    transform-origin: bottom right;
+    transform: scale(.6); opacity: 0; pointer-events: none;
+    transition: transform .38s var(--spring), opacity .2s;
+    z-index: 50;
+  }
+  .dropdown.open { transform: scale(1); opacity: 1; pointer-events: auto; }
+  .dropdown .item {
+    padding: 9px 14px; color: #fff; font-size: 12px; cursor: pointer;
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .dropdown .item:first-child { padding-top: 12px; }
+  .dropdown .item:last-child  { padding-bottom: 12px; }
+  .dropdown .item:hover { background: rgba(255,255,255,0.08); }
+  .dropdown .item .tick { opacity: 0; font-size: 10px; }
+  .dropdown .item.sel .tick { opacity: 1; }
+
+  .send {
+    width: 29px; height: 29px; border-radius: 10px;
+    margin-left: 10px;
+    background: #a9432c;
+    border: none; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    box-shadow:
+      inset 1.5px 1.5px 1px -1px rgba(255,255,255,0.6),
+      inset -1px -1px 1px -1px rgba(255,255,255,0.25),
+      0 4px 12px rgba(169,67,44,0.45);
+    transition: transform .4s var(--spring);
+  }
+  .send:active { transform: scale(.85); }
+  .send img { width: 20px; height: 18px; }
+
+  /* ═══════════ HISTORY SCREEN ═══════════ */
+  .hist-row {
+    left: 49px; width: 342px; height: 70px; border-radius: 13px;
+    cursor: pointer;
+    transition: transform .4s var(--spring), opacity .3s;
+  }
+  .hist-row:active { transform: scale(.97); }
+  .hist-row.removed { opacity: 0; transform: scale(.8); pointer-events: none; }
+  .hist-row .t {
+    position: absolute; left: 30px; top: 16px;
+    color: #fff; font-size: 13px; font-weight: 600;
+  }
+  .hist-row .s {
+    position: absolute; left: 30px; top: 38px;
+    color: rgba(255,255,255,.85); font-size: 10px;
+  }
+  .hist-row .rm {
+    position: absolute; right: 21px; top: 25px; width: 20px; height: 20px;
+    background: none; border: none; cursor: pointer; opacity: .8;
+    transition: transform .4s var(--spring);
+  }
+  .hist-row .rm:active { transform: scale(.7); }
+  .hist-row .rm img { width: 100%; height: 100%; }
+
+  /* ═══════════ CONTINUE CHAT SCREEN — live message flow ═══════════ */
+  .chat-scroll {
+    position: absolute; left: 0; right: 0; top: 128px; bottom: 150px;
+    overflow-y: auto; overscroll-behavior: contain;
+    padding: 16px 30px 10px;
+    display: flex; flex-direction: column; gap: 6px;
+    scrollbar-width: none;
+    -webkit-mask-image: linear-gradient(180deg, transparent 0, #000 26px, #000 calc(100% - 8px), transparent 100%);
+            mask-image: linear-gradient(180deg, transparent 0, #000 26px, #000 calc(100% - 8px), transparent 100%);
+  }
+  .chat-scroll::-webkit-scrollbar { display: none; }
+
+  .glass.rel { position: relative; }          /* glass, but in-flow */
+
+  .msg { display: flex; flex-direction: column; max-width: 82%;
+         animation: rise .5s var(--spring); }
+  @keyframes rise {
+    from { opacity: 0; transform: translateY(22px) scale(.88); }
+    to   { opacity: 1; transform: none; }
+  }
+  .msg.user { align-self: flex-end; align-items: flex-end; }
+  .msg.ai   { align-self: flex-start; align-items: flex-start; }
+
+  .msg .who { width: 25px; height: 25px; margin-bottom: 2px; }
+  .msg.ai .who { width: 20px; height: 20px; }
+
+  .msg .bubble {
+    border-radius: 19px;
+    padding: 11px 18px;
+    color: #fff; font-size: 13px; font-weight: 600; line-height: 1.45;
+  }
+  .msg.user .bubble { border-radius: 47px; --glass-tint: rgba(248,255,49,0.16); }
+  .msg.ai .bubble   { --glass-tint: rgba(217,217,217,0.14); }
+
+  /* streaming caret */
+  .msg.ai .bubble .txt.streaming::after {
+    content: ''; display: inline-block;
+    width: 7px; height: 13px; margin-left: 3px;
+    background: rgba(255,255,255,.85); border-radius: 2px;
+    vertical-align: -2px;
+    animation: caret 0.9s steps(1) infinite;
+  }
+  @keyframes caret { 50% { opacity: 0; } }
+
+  /* typing indicator */
+  .dots { display: inline-flex; gap: 5px; padding: 3px 2px; }
+  .dots i {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: rgba(255,255,255,.8);
+    animation: bob 1.2s ease-in-out infinite;
+  }
+  .dots i:nth-child(2) { animation-delay: .15s }
+  .dots i:nth-child(3) { animation-delay: .3s }
+  @keyframes bob {
+    0%, 60%, 100% { transform: translateY(0); opacity: .5 }
+    30% { transform: translateY(-5px); opacity: 1 }
+  }
+
+  .msg .meta {
+    display: flex; align-items: center; gap: 8px;
+    margin: 5px 4px 0;
+    opacity: 0; transition: opacity .4s;
+  }
+  .msg .meta.in { opacity: 1; }
+  .msg .meta .tag { color: #fff; font-size: 10px; font-weight: 500; }
+  .msg .meta .copy { width: 15px; height: 15px; cursor: pointer; opacity: .8; }
+
+  /* ── Thinking on/off — mini liquid switch (replaces "Max") ── */
+  .think {
+    display: flex; align-items: center; gap: 5px;
+    margin-left: 8px; cursor: pointer;
+  }
+  .think .tl { color: rgba(255,255,255,.5); font-size: 10px; font-weight: 500;
+               transition: color .3s; }
+  .think.on .tl { color: #c8f78a; }
+  .think .tswitch {
+    position: relative; width: 27px; height: 16px; border-radius: 47px;
+    background: rgba(217,217,217,0.15);
+    box-shadow: inset 0 1px 3px rgba(0,0,0,.35), inset 0 0 0 .5px rgba(255,255,255,.15);
+    transition: background .35s;
+  }
+  .think.on .tswitch { background: rgba(123,255,0,0.32); }
+  .think .tthumb {
+    left: 1.5px; top: 1.5px; width: 13px; height: 13px; border-radius: 50%;
+    --glass-tint: rgba(255,255,255,0.5);
+    --glass-rim: rgba(255,255,255,0.9);
+    transition: left .4s var(--spring);
+  }
+  .think.on .tthumb { left: 12.5px; }
+  .think .tthumb.gel { animation: gel .45s ease; }
+
+  /* ═══════════ PROVIDERS SCREEN ═══════════ */
+  .lp-pill {
+    left: 30px; top: 175px; width: 158px; height: 40px; border-radius: 47px;
+    display: flex; align-items: center; justify-content: center;
+    color: #fff; font-size: 15px; font-weight: 500;
+  }
+  .add-prov {
+    left: 370px; top: 176px; width: 40px; height: 40px; border-radius: 47px;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .add-prov img { width: 22px; height: 22px; }
+
+  .prov-card { left: 30px; top: 233px; width: 380px; height: 88px; border-radius: 16px; }
+  .prov-card .name { position: absolute; left: 22px; top: 16px; color: #fff; font-size: 17px; font-weight: 600; }
+  .pill {
+    position: absolute; border-radius: 47px;
+    display: flex; align-items: center; justify-content: center;
+    color: #fff; font-weight: 600; cursor: default;
+    -webkit-backdrop-filter: blur(6px) saturate(150%);
+    backdrop-filter: blur(6px) saturate(150%);
+    box-shadow:
+      inset 1.2px 1.2px 1px -1px rgba(255,255,255,.5),
+      inset -1px -1px 1px -1px rgba(255,255,255,.18),
+      0 3px 8px rgba(0,0,0,.12);
+  }
+  .pill.tiny { height: 15px; font-size: 7px; }
+  .pill.btn { cursor: pointer; transition: transform .4s var(--spring), filter .15s; }
+  .pill.btn:hover { filter: brightness(1.3); }
+  .pill.btn:active { transform: scale(.9); }
+
+  .form-panel { left: 30px; top: 345px; width: 380px; height: 372px; border-radius: 16px;
+                --glass-blur: 14px;
+                transform-origin: 360px -150px;   /* the + button it springs from */
+                transition: transform .5s var(--spring), opacity .3s ease; }
+  .form-panel:not(.open) {
+    opacity: 0; pointer-events: none;
+    transform: scale(.1);
+  }
+  .form-panel.expanded { height: 590px; }      /* grows when models arrive */
+  .form-panel:not(.expanded) .divider,
+  .form-panel:not(.expanded) .th,
+  .form-panel:not(.expanded) .models-scroll { display: none; }
+
+  /* fetching indicator inside the models area */
+  .fetching { display: flex; justify-content: center; padding: 24px 0 10px; }
+
+  /* manual add-model popover — springs from the + */
+  .madd {
+    position: absolute; left: 60px; top: 210px; width: 260px;
+    border-radius: 16px; z-index: 5;
+    --glass-tint: rgba(30,30,30,0.4);
+    --glass-blur: 12px;
+    transform-origin: 105% 120%;
+    transform: scale(.4); opacity: 0; pointer-events: none;
+    transition: transform .45s var(--spring), opacity .2s;
+    padding: 14px 16px 16px;
+  }
+  .madd.open { transform: scale(1); opacity: 1; pointer-events: auto; }
+  .madd .mtitle { color: #fff; font-size: 12px; font-weight: 600; margin-bottom: 10px; text-align: center; }
+  .madd input {
+    width: 100%; height: 30px; border-radius: 47px; border: none; outline: none;
+    background: rgba(217,217,217,0.14);
+    box-shadow: inset 0 1px 3px rgba(0,0,0,.3), inset 0 0 0 .5px rgba(255,255,255,.15);
+    color: #fff; font-size: 12px; font-family: inherit;
+    padding: 0 14px; margin-bottom: 8px;
+  }
+  .madd input::placeholder { color: rgba(255,255,255,.45); }
+  .madd .mact {
+    display: block; margin: 4px auto 0;
+    width: 96px; height: 28px; border-radius: 47px; border: none; cursor: pointer;
+    background: rgba(25,255,0,0.3);
+    color: #fff; font-size: 12px; font-weight: 600; font-family: inherit;
+    -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
+    box-shadow: inset 1.2px 1.2px 1px -1px rgba(255,255,255,.5), 0 3px 8px rgba(0,0,0,.15);
+    transition: transform .4s var(--spring), filter .15s;
+  }
+  .madd .mact:hover { filter: brightness(1.25); }
+  .madd .mact:active { transform: scale(.9); }
+
+  .mrow { animation: rise .45s var(--spring) both; }
+
+  /* provider-type liquid toggle: track 180×30 · lens 100×38 */
+  .ptype {
+    position: absolute; left: 100px; top: 58px; width: 180px; height: 30px;
+    border-radius: 47px; background: rgba(217,217,217,0.12);
+    box-shadow: inset 0 1px 3px rgba(0,0,0,.25), inset 0 0 0 .5px rgba(255,255,255,.12);
+  }
+  .ptype .lens {
+    left: -4px; top: -4px; width: 100px; height: 38px; border-radius: 47px;
+    --glass-tint: rgba(255,255,255,0.14);
+    --glass-rim: rgba(255,255,255,0.7);
+    transition: left .5s var(--spring);
+    will-change: left, transform;
+  }
+  .ptype[data-sel="1"] .lens { left: 84px; }
+  .ptype .lens.gel { animation: gel .5s ease; }
+  .ptype .opt {
+    position: absolute; top: 0; height: 30px; width: 90px;
+    display: flex; align-items: center; justify-content: center;
+    color: #fff; font-size: 14px; cursor: pointer; z-index: 2;
+    opacity: .75; transition: font-size .3s, opacity .3s;
+  }
+  .ptype .opt:nth-child(2) { left: 0; }
+  .ptype .opt:nth-child(3) { right: 0; }
+  .ptype[data-sel="0"] .opt:nth-child(2),
+  .ptype[data-sel="1"] .opt:nth-child(3) { font-size: 16px; font-weight: 600; opacity: 1; }
+
+  .field-label { position: absolute; left: 46px; color: #fff; font-size: 12px; font-weight: 600; }
+  .field {
+    position: absolute; left: 40px; width: 300px; height: 32px; border-radius: 47px;
+    background: rgba(217,217,217,0.12);
+    box-shadow: inset 0 1px 3px rgba(0,0,0,.25), inset 0 0 0 .5px rgba(255,255,255,.12);
+    border: none; outline: none;
+    color: #fff; font-size: 13px; font-family: inherit;
+    padding: 0 16px;
+    transition: box-shadow .25s;
+  }
+  .field::placeholder { color: rgba(255,255,255,.5); }
+  .field:focus { box-shadow: inset 0 1px 3px rgba(0,0,0,.25), inset 0 0 0 1px rgba(255,255,255,.45); }
+
+  .done-btn, .close-btn {
+    position: absolute; top: 18px; width: 36px; height: 36px; border-radius: 47px;
+    border: none; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    transition: transform .4s var(--spring), filter .15s;
+    -webkit-backdrop-filter: blur(6px) saturate(150%);
+    backdrop-filter: blur(6px) saturate(150%);
+    box-shadow:
+      inset 1.5px 1.5px 1px -1px rgba(255,255,255,.55),
+      inset -1px -1px 1px -1px rgba(255,255,255,.2),
+      0 4px 10px rgba(0,0,0,.15);
+  }
+  .done-btn { left: 280px; background: rgba(0,255,43,0.28); }
+  .close-btn { left: 324px; background: rgba(255,0,0,0.3); }
+  .done-btn:active, .close-btn:active { transform: scale(.85); }
+  .done-btn img, .close-btn img { width: 24px; height: 24px; }
+
+  .divider { position: absolute; left: 34px; top: 352px; width: 312px; height: 1px;
+             background: rgba(255,255,255,.3); }
+
+  .th { position: absolute; color: #fff; font-size: 12px; }
+
+  /* scrollable models list */
+  .models-scroll {
+    position: absolute; left: 24px; right: 12px; top: 408px; bottom: 14px;
+    overflow-y: auto; overscroll-behavior: contain;
+    padding: 6px 6px 6px 8px;
+    display: flex; flex-direction: column; gap: 6px;
+    -webkit-mask-image: linear-gradient(180deg, transparent 0, #000 10px, #000 calc(100% - 10px), transparent 100%);
+            mask-image: linear-gradient(180deg, transparent 0, #000 10px, #000 calc(100% - 10px), transparent 100%);
+  }
+  .models-scroll::-webkit-scrollbar { width: 4px; }
+  .models-scroll::-webkit-scrollbar-track { background: transparent; }
+  .models-scroll::-webkit-scrollbar-thumb {
+    background: rgba(255,255,255,.35); border-radius: 47px;
+  }
+  .models-scroll { scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.35) transparent; }
+
+  .mrow { display: flex; align-items: center; gap: 10px; flex: none; }
+  .mrow .pill { position: static; }
+  .mrow .vcheck { position: static; margin-left: auto; margin-right: 14px; flex: none; }
+
+  /* vision checkbox — liquid glass check */
+  .vcheck {
+    position: absolute; width: 19px; height: 19px; border-radius: 47px;
+    border: none; cursor: pointer;
+    background: rgba(217,217,217,0.2);
+    box-shadow: inset 0 1px 2px rgba(0,0,0,.3), inset 0 0 0 .5px rgba(255,255,255,.15);
+    transition: background .25s, transform .4s var(--spring);
+  }
+  .vcheck.on { background: rgba(25,255,0,0.45);
+               box-shadow: inset 1px 1px 1px -.5px rgba(255,255,255,.7), 0 0 8px rgba(25,255,0,.35); }
+  .vcheck:active { transform: scale(.75); }
+  .vcheck.pop { animation: pop .4s var(--spring); }
+  @keyframes pop { 0%{transform:scale(.75)} 60%{transform:scale(1.25)} 100%{transform:scale(1)} }
+
+  svg.defs { position: absolute; width: 0; height: 0; }
+</style>
+</head>
+<body>
+
+<svg class="defs" xmlns="http://www.w3.org/2000/svg">
+  <filter id="liquid-lens" x="-5%" y="-5%" width="110%" height="110%" color-interpolation-filters="sRGB">
+    <feTurbulence type="fractalNoise" baseFrequency="0.008 0.008" numOctaves="2" seed="7" result="noise"/>
+    <feGaussianBlur in="noise" stdDeviation="2" result="soft"/>
+    <feDisplacementMap in="SourceGraphic" in2="soft" scale="70" xChannelSelector="R" yChannelSelector="G"/>
+  </filter>
+</svg>
+
+<div class="phone" data-screen="new">
+  <div class="orb o1"></div>
+  <div class="orb o2"></div>
+  <div class="orb o3"></div>
+  <div class="orb o4"></div>
+
+  <!-- ══ shared header ══ -->
+  <div class="glass pressable logo-blob" id="logoBtn" title="Provider settings">
+    <img data-fb="logo" src="http://localhost:3845/assets/a38c883b3c1739777f1ea7e3384b8b27afe48b91.png" alt="Claude">
+  </div>
+
+  <div class="seg" id="segTabs" data-sel="0">
+    <div class="glass lens"></div>
+    <div class="opt" data-i="0">Chat</div>
+    <div class="opt" data-i="1">History</div>
+  </div>
+
+  <div class="glass providers-pill" id="provPill" style="display:none"><span>Providers</span></div>
+
+  <button class="new-chat-btn" id="newChatBtn" title="New chat">
+    <img data-fb="plus" src="http://localhost:3845/assets/4ae2535f3a786a2f4615bea5788d194026fca96d.png" alt="new chat">
+  </button>
+
+  <!-- ══ NEW CHAT ══ -->
+  <section class="screen active" id="scr-new">
+    <img class="clawd-hero" data-fb="clawd" src="http://localhost:3845/assets/0afe963cd938d7eff99ef97210ad23b6538aebf9.png" alt="Clawd">
+    <div class="hero-title">How can I help you today?</div>
+    <div class="glass pressable chip c1" data-fill="Summerize this page"><span>Summerize this page</span></div>
+    <div class="glass pressable chip c2" data-fill="Solve the questions"><span>Solve the questions</span></div>
+    <div class="glass pressable chip c3" data-fill="Fill the form."><span>Fill the form.</span></div>
+  </section>
+
+  <!-- ══ HISTORY ══ -->
+  <section class="screen" id="scr-history"></section>
+
+  <!-- ══ CONTINUE CHAT — live conversation ══ -->
+  <section class="screen" id="scr-chat">
+    <div class="chat-scroll" id="chatScroll"></div>
+  </section>
+
+  <!-- ══ PROVIDERS ══ -->
+  <section class="screen" id="scr-providers">
+    <div class="glass lp-pill"><span>List Providers</span></div>
+    <div class="glass pressable add-prov" id="addProvBtn" title="Add provider">
+      <img data-fb="plus" src="http://localhost:3845/assets/3794c38c3a74a14a267d2f2782eaa136415a880e.png" alt="add">
+    </div>
+
+    <div class="glass prov-card">
+      <span class="name">OllamaCloud</span>
+      <span class="pill tiny" style="left:22px; top:52px; width:74px; height:22px; font-size:10px; background:rgba(11,11,11,0.4)">OpenAI</span>
+      <span class="pill tiny" style="left:102px; top:52px; width:62px; height:22px; font-size:10px; background:rgba(255,0,0,0.32)">5 Models</span>
+      <span class="pill tiny" style="left:170px; top:52px; width:54px; height:22px; font-size:10px; background:rgba(123,255,0,0.32); color:#a30b0b">Active</span>
+      <span class="pill tiny btn" style="left:262px; top:18px; width:44px; height:22px; font-size:11px; background:rgba(87,159,19,0.4)">Edit</span>
+      <span class="pill tiny btn" style="left:314px; top:18px; width:52px; height:22px; font-size:11px; background:rgba(255,0,0,0.32)">Delete</span>
+    </div>
+
+    <div class="glass form-panel" id="formPanel">
+      <button class="done-btn" id="doneBtn" title="Save">
+        <img data-fb="done" src="http://localhost:3845/assets/61bd3a070ac19da3896ca19d1ba44c953cdb5a8a.png" alt="done">
+      </button>
+      <button class="close-btn" id="closeBtn" title="Close">
+        <img data-fb="close" src="http://localhost:3845/assets/92a674a28f8dc9b3e0fa1b09d0b81dfac87ba6ff.png" alt="close">
+      </button>
+
+      <!-- provider type — liquid toggle -->
+      <div class="ptype" id="ptype" data-sel="0">
+        <div class="glass lens"></div>
+        <div class="opt" data-i="0">OpenAI</div>
+        <div class="opt" data-i="1">Antropic</div>
+      </div>
+
+      <span class="field-label" style="top:112px">Display name <span style="opacity:.55">(Shown in the chat)</span></span>
+      <input class="field" style="top:130px" placeholder="E.g; My OpenAI">
+      <span class="field-label" style="top:176px">Base URL</span>
+      <input class="field" id="baseUrlField" style="top:194px" placeholder="https://openai.com">
+      <span class="field-label" style="top:240px">API KEY</span>
+      <input class="field" style="top:258px" placeholder="E.g; sk-****, aero-****">
+
+      <span class="pill btn" id="testBtn" style="left:53px; top:308px; width:110px; height:28px; font-size:12px; background:rgba(255,27,27,0.28)">Test Connection</span>
+      <span class="pill btn" id="fetchBtn" style="left:173px; top:308px; width:110px; height:28px; font-size:12px; background:rgba(25,255,0,0.25)">Fetch Models</span>
+      <span class="pill btn" id="maddBtn" style="left:293px; top:308px; width:34px; height:28px; background:rgba(25,255,0,0.25)" title="Add model manually">
+        <img data-fb="plus" width="16" src="http://localhost:3845/assets/3794c38c3a74a14a267d2f2782eaa136415a880e.png" alt="+">
+      </span>
+
+      <!-- manual add-model popover -->
+      <div class="glass madd" id="maddPop">
+        <div class="mtitle">Add model manually</div>
+        <input id="maddId" placeholder="Model ID — e.g; claude-fable-5">
+        <input id="maddName" placeholder="Display name — e.g; Fable 5">
+        <button class="mact" id="maddGo">Add</button>
+      </div>
+
+      <div class="divider" style="top:352px"></div>
+      <span class="th" style="left:167px; top:364px; font-weight:600; font-size:14px">Models</span>
+      <span class="th" style="left:56px;  top:390px">Model ID</span>
+      <span class="th" style="left:170px; top:390px">Display name</span>
+      <span class="th" style="left:300px; top:390px">Vision</span>
+
+      <!-- model rows — scrollable list -->
+      <div class="models-scroll" id="modelsScroll"></div>
+    </div>
+  </section>
+
+  <!-- ══ input bar (new chat + continue chat) ══ -->
+  <div class="glass inputbar" id="inputbar">
+    <input class="prompt" id="promptInput" placeholder="How can I help u today..?">
+    <div class="row">
+      <button class="icon-glyph" title="Screen grab — crop &amp; send">
+        <svg width="21" height="21" viewBox="0 0 25 25" fill="none">
+          <path d="M3 8V5.2A2.2 2.2 0 0 1 5.2 3H8M17 3h2.8A2.2 2.2 0 0 1 22 5.2V8M22 17v2.8a2.2 2.2 0 0 1-2.2 2.2H17M8 22H5.2A2.2 2.2 0 0 1 3 19.8V17"
+                stroke="#fff" stroke-width="1.9" stroke-linecap="round"/>
+          <rect x="8.2" y="9.4" width="8.6" height="6.6" rx="1.8" stroke="#fff" stroke-width="1.5"/>
+          <circle cx="12.5" cy="12.7" r="1.6" fill="#fff"/>
+        </svg>
+      </button>
+      <div class="model-sel" id="modelSel">
+        <span class="m" id="modelName">Opus 4.8</span>
+        <div class="glass dropdown" id="modelDrop">
+          <div class="item sel"><span>Opus 4.8</span><span class="tick">✓</span></div>
+          <div class="item"><span>Fable 5</span><span class="tick">✓</span></div>
+          <div class="item"><span>Sonnet 5</span><span class="tick">✓</span></div>
+        </div>
+      </div>
+      <div class="think" id="thinkToggle" title="Extended thinking on/off">
+        <span class="tl">Thinking</span>
+        <div class="tswitch"><div class="glass tthumb"></div></div>
+      </div>
+      <button class="icon-glyph" title="Add file" style="margin-left:6px">
+        <svg width="23" height="23" viewBox="0 0 29 29" fill="none">
+          <circle cx="14.5" cy="14.5" r="11.2" stroke="#fff" stroke-width="1.7"/>
+          <path d="M14.5 9.4v10.2M9.4 14.5h10.2" stroke="#fff" stroke-width="1.8" stroke-linecap="round"/>
+        </svg>
+      </button>
+      <button class="send" id="sendBtn" title="Send">
+        <img data-fb="logo" src="http://localhost:3845/assets/a38c883b3c1739777f1ea7e3384b8b27afe48b91.png" alt="send">
+      </button>
+    </div>
+  </div>
+</div>
+
+<script>
+  /* ── fallbacks if Figma's asset server (localhost:3845) is down ── */
+  const FALLBACKS = {
+    logo:  '<svg viewBox="0 0 24 24" fill="none"><path d="M12 2v20M2 12h20M5 5l14 14M19 5L5 19" stroke="#fff" stroke-width="2" stroke-linecap="round"/></svg>',
+    plus:  '<svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="#fff" stroke-width="1.4"/><path d="M12 7v10M7 12h10" stroke="#fff" stroke-width="1.6" stroke-linecap="round"/></svg>',
+    tools: '<svg viewBox="0 0 22 22" fill="none"><path d="M3 7h16M3 15h16" stroke="#fff" stroke-width="1.6" stroke-linecap="round"/><circle cx="14" cy="7" r="2.5" fill="#87b637" stroke="#fff"/><circle cx="8" cy="15" r="2.5" fill="#87b637" stroke="#fff"/></svg>',
+    clawd: '<svg viewBox="0 0 32 22" fill="none"><ellipse cx="16" cy="12" rx="14" ry="9" fill="#d97757"/><rect x="6" y="7" width="9" height="5" rx="2" fill="#111"/><rect x="17" y="7" width="9" height="5" rx="2" fill="#111"/></svg>',
+    copy:  '<svg viewBox="0 0 16 16" fill="none"><rect x="5" y="5" width="9" height="9" rx="2" stroke="#fff"/><rect x="2" y="2" width="9" height="9" rx="2" stroke="#fff" opacity=".6"/></svg>',
+    remove:'<svg viewBox="0 0 20 20" fill="none"><circle cx="10" cy="10" r="9" stroke="#fff" opacity=".7"/><path d="M6.5 6.5l7 7M13.5 6.5l-7 7" stroke="#fff" stroke-width="1.4" stroke-linecap="round"/></svg>',
+    batman:'<svg viewBox="0 0 25 25"><circle cx="12.5" cy="12.5" r="12" fill="#222"/><path d="M5 14c2-4 4-5 4-5l1 2 2.5-1 2.5 1 1-2s2 1 4 5c-3 2-12 2-15 0z" fill="#f5d90a"/></svg>',
+    done:  '<svg viewBox="0 0 20 20" fill="none"><path d="M4 10.5l4 4 8-9" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+    close: '<svg viewBox="0 0 20 20" fill="none"><path d="M5 5l10 10M15 5L5 15" stroke="#fff" stroke-width="2" stroke-linecap="round"/></svg>'
+  };
+  document.querySelectorAll('img[data-fb]').forEach(img => {
+    img.addEventListener('error', () => {
+      const span = document.createElement('span');
+      span.innerHTML = FALLBACKS[img.dataset.fb];
+      const svg = span.firstChild;
+      svg.setAttribute('width', img.getAttribute('width') || img.width || 22);
+      svg.style.cssText = img.style.cssText;
+      svg.setAttribute('class', img.className);
+      img.replaceWith(svg);
+    });
+  });
+
+  /* ── screen router ── */
+  const phone = document.querySelector('.phone');
+  const seg = document.getElementById('segTabs');
+  function show(name) {
+    phone.dataset.screen = name;
+    document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+    document.getElementById('scr-' + name).classList.add('active');
+    const isProviders = name === 'providers';
+    seg.style.display = isProviders ? 'none' : '';
+    document.getElementById('provPill').style.display = isProviders ? 'flex' : 'none';
+    document.getElementById('newChatBtn').style.display = isProviders ? 'none' : '';
+    document.getElementById('inputbar').style.display =
+      (name === 'new' || name === 'chat') ? '' : 'none';
+    if (isProviders) {                       /* popup only opens via the + button */
+      document.getElementById('formPanel').classList.remove('open');
+      document.getElementById('maddPop').classList.remove('open');
+    }
+  }
+
+  /* ── liquid segmented toggles (the iOS gel slide) ── */
+  function liquidToggle(el, onChange) {
+    const lens = el.querySelector('.lens');
+    el.querySelectorAll('.opt').forEach(opt => {
+      opt.addEventListener('click', () => {
+        const i = opt.dataset.i;
+        if (el.dataset.sel === i) return;
+        el.dataset.sel = i;
+        lens.classList.remove('gel');
+        void lens.offsetWidth;          // restart animation
+        lens.classList.add('gel');
+        onChange && onChange(+i);
+      });
+    });
+  }
+  liquidToggle(seg, i => show(i === 0 ? 'new' : 'history'));
+  liquidToggle(document.getElementById('ptype'), i => {
+    document.getElementById('baseUrlField').placeholder =
+      i === 0 ? 'https://openai.com' : 'https://api.anthropic.com';
+  });
+
+  /* ── header actions ── */
+  document.getElementById('logoBtn').addEventListener('click', () => {
+    if (phone.dataset.screen === 'providers') { seg.dataset.sel = '0'; show('new'); }
+    else show('providers');
+  });
+  document.getElementById('newChatBtn').addEventListener('click', () => {
+    seg.dataset.sel = '0';
+    document.getElementById('promptInput').value = '';
+    show('new');
+  });
+
+  /* ── add-provider modal: springs out of the + button ── */
+  const formPanel = document.getElementById('formPanel');
+  document.getElementById('addProvBtn').addEventListener('click', () => formPanel.classList.add('open'));
+  document.querySelectorAll('.prov-card .pill.btn')[0]           // Edit
+    .addEventListener('click', () => formPanel.classList.add('open'));
+  const closeProviderModal = () => {
+    formPanel.classList.remove('open');
+    document.getElementById('maddPop').classList.remove('open');
+  };
+  document.getElementById('doneBtn').addEventListener('click', closeProviderModal);
+  document.getElementById('closeBtn').addEventListener('click', closeProviderModal);
+
+  /* ── new chat: chips fill the prompt ── */
+  document.querySelectorAll('.chip').forEach(c =>
+    c.addEventListener('click', () => {
+      const inp = document.getElementById('promptInput');
+      inp.value = c.dataset.fill;
+      inp.focus();
+    }));
+
+  /* ═══════════ LIVE CHAT ENGINE (streaming simulation) ═══════════ */
+  const chatScroll = document.getElementById('chatScroll');
+  const promptInput = document.getElementById('promptInput');
+  const scrollDown = () => { chatScroll.scrollTop = chatScroll.scrollHeight; };
+
+  const AVATARS = {
+    user: { fb: 'batman', src: 'http://localhost:3845/assets/abac6fe851b0e1330ddf538a1c0ad0fead99848b.png' },
+    ai:   { fb: 'clawd',  src: 'http://localhost:3845/assets/0afe963cd938d7eff99ef97210ad23b6538aebf9.png' }
+  };
+  function avatarImg(role) {
+    const img = document.createElement('img');
+    img.className = 'who';
+    img.src = AVATARS[role].src;
+    img.addEventListener('error', () => {
+      const span = document.createElement('span');
+      span.innerHTML = FALLBACKS[AVATARS[role].fb];
+      span.firstChild.setAttribute('width', role === 'user' ? 25 : 20);
+      span.firstChild.setAttribute('class', 'who');
+      img.replaceWith(span.firstChild);
+    });
+    return img;
+  }
+
+  function addMsg(role, text) {
+    const msg = document.createElement('div');
+    msg.className = 'msg ' + role;
+    msg.appendChild(avatarImg(role));
+    const bubble = document.createElement('div');
+    bubble.className = 'glass rel bubble';
+    const txt = document.createElement('span');
+    txt.className = 'txt';
+    txt.textContent = text;
+    bubble.appendChild(txt);
+    msg.appendChild(bubble);
+    chatScroll.appendChild(msg);
+    scrollDown();
+    return { msg, bubble, txt };
+  }
+
+  function addMeta(msg) {
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    const tag = document.createElement('span');
+    tag.className = 'tag';
+    tag.textContent = document.getElementById('modelName').textContent;
+    const cp = document.createElement('img');
+    cp.className = 'copy'; cp.title = 'Copy';
+    cp.src = 'http://localhost:3845/assets/8ed88a3333fd9d94044447c8307abffe52431ade.png';
+    cp.addEventListener('error', () => {
+      const s = document.createElement('span');
+      s.innerHTML = FALLBACKS.copy;
+      s.firstChild.setAttribute('width', 15);
+      s.firstChild.setAttribute('class', 'copy');
+      cp.replaceWith(s.firstChild);
+    });
+    cp.addEventListener('click', () =>
+      navigator.clipboard?.writeText(msg.querySelector('.txt').textContent));
+    meta.append(tag, cp);
+    msg.appendChild(meta);
+    requestAnimationFrame(() => requestAnimationFrame(() => meta.classList.add('in')));
+  }
+
+  const REPLIES = [
+    [/summ?[ae]rize/i, 'Here’s the gist of this page: it’s a liquid-glass chat UI for your browser agent — glass nav, chat history, and a provider manager. Clean, green, and very Apple. 🌿'],
+    [/solve|question/i, 'Send them over! Screenshot the questions with the crop tool and I’ll work through each one step by step.'],
+    [/form/i, 'On it — I’ll scan the page for input fields, match them to your saved details, and fill everything except passwords. Want me to submit too, or leave that to you?'],
+    [/yo|what.?s up|hey|hi|hello/i, 'Nothing Much Just Hanging around'],
+    [/.*/, 'Got it! Give me a second to look at the page and I’ll take care of that for you. ✨']
+  ];
+  const reply = t => REPLIES.find(([re]) => re.test(t))[1];
+
+  let busy = false;
+  function converse(text) {
+    if (busy) return;
+    busy = true;
+    addMsg('user', text);
+
+    /* typing indicator */
+    const t = addMsg('ai', '');
+    t.txt.remove();
+    const dots = document.createElement('span');
+    dots.className = 'dots';
+    dots.innerHTML = '<i></i><i></i><i></i>';
+    t.bubble.appendChild(dots);
+
+    const thinking = document.getElementById('thinkToggle').classList.contains('on');
+    setTimeout(() => {
+      /* swap dots for streaming text */
+      dots.remove();
+      const txt = document.createElement('span');
+      txt.className = 'txt streaming';
+      t.bubble.appendChild(txt);
+      const words = reply(text).split(' ');
+      let i = 0;
+      const tick = () => {
+        txt.textContent += (i ? ' ' : '') + words[i];
+        scrollDown();
+        if (++i < words.length) setTimeout(tick, 45 + Math.random() * 110);
+        else {
+          txt.classList.remove('streaming');
+          addMeta(t.msg);
+          scrollDown();
+          busy = false;
+        }
+      };
+      tick();
+    }, thinking ? 2600 : 1100);   /* thinking mode ponders longer */
+  }
+
+  function seedDemo() {
+    chatScroll.innerHTML = '';
+    const u = addMsg('user', 'Yo, What’s up.....');
+    const a = addMsg('ai', 'Nothing Much Just Hanging around');
+    addMeta(a.msg);
+  }
+
+  function sendFromInput() {
+    const text = promptInput.value.trim();
+    if (!text) return;
+    promptInput.value = '';
+    if (phone.dataset.screen !== 'chat') { chatScroll.innerHTML = ''; show('chat'); }
+    converse(text);
+  }
+  document.getElementById('sendBtn').addEventListener('click', sendFromInput);
+  promptInput.addEventListener('keydown', e => { if (e.key === 'Enter') sendFromInput(); });
+
+  /* ── thinking toggle (per Figma annotation: replaces "Max") ── */
+  const think = document.getElementById('thinkToggle');
+  think.addEventListener('click', () => {
+    think.classList.toggle('on');
+    const th = think.querySelector('.tthumb');
+    th.classList.remove('gel');
+    void th.offsetWidth;
+    th.classList.add('gel');
+  });
+
+  /* ── history rows ── */
+  const hist = document.getElementById('scr-history');
+  const chats = [
+    ['Yo, What’s up', 'Chat about to apply resume in linkding.'],
+    ['Liquid Glass UI', 'Rebuilding the chat window with Apple glass.'],
+    ['VPS setup', 'Late-night server hardening session.'],
+    ['Scraper project', 'Playwright vs the anti-bot wall.'],
+    ['LLM API testing', 'Benchmarking Fable 5 against Opus.'],
+    ['Form autofill', 'Teaching the agent to fill forms solo.'],
+    ['Extension rev', 'No-CDP browser agent brainstorm.'],
+    ['Ollama models', 'Which local model fits 16GB?']
+  ];
+  const rowTops = [169, 252, 335, 418, 501, 584, 667, 750];
+  chats.forEach(([t, s], i) => {
+    const row = document.createElement('div');
+    row.className = 'glass hist-row';
+    row.style.top = rowTops[i] + 'px';
+    row.innerHTML = `<span class="t"></span><span class="s"></span>
+      <button class="rm" title="Remove">
+        <img data-fb="remove" src="http://localhost:3845/assets/a6a0e556b3f3dea6c01447e48d3c406e4a8d9fa1.png" alt="x">
+      </button>`;
+    row.querySelector('.t').textContent = t;
+    row.querySelector('.s').textContent = s;
+    row.addEventListener('click', () => { seedDemo(); show('chat'); });
+    row.querySelector('.rm').addEventListener('click', e => {
+      e.stopPropagation();
+      row.classList.add('removed');
+    });
+    const img = row.querySelector('img');
+    img.addEventListener('error', () => {
+      const span = document.createElement('span');
+      span.innerHTML = FALLBACKS.remove;
+      span.firstChild.setAttribute('width', 20);
+      img.replaceWith(span.firstChild);
+    });
+    hist.appendChild(row);
+  });
+
+  /* ── model dropdown ── */
+  const modelSel = document.getElementById('modelSel');
+  const drop = document.getElementById('modelDrop');
+  modelSel.addEventListener('click', e => {
+    if (e.target.closest('.item')) return;
+    drop.classList.toggle('open');
+  });
+  drop.querySelectorAll('.item').forEach(item =>
+    item.addEventListener('click', () => {
+      drop.querySelectorAll('.item').forEach(i => i.classList.remove('sel'));
+      item.classList.add('sel');
+      document.getElementById('modelName').textContent = item.querySelector('span').textContent;
+      drop.classList.remove('open');
+    }));
+  document.addEventListener('click', e => {
+    if (!modelSel.contains(e.target)) drop.classList.remove('open');
+  });
+
+  /* ── models list: hidden until fetched or added manually ── */
+  const MODELS = [
+    ['claude-fable-5',   'Fable 5',   true],
+    ['claude-opus-4-8',  'Opus 4.8',  false],
+    ['claude-sonnet-5',  'Sonnet 5',  true],
+    ['gpt-image-1',      'Image Gen', false],
+    ['gpt-5.2-pro',      'GPT 5.2',   true],
+    ['gemini-3-pro',     'Gemini 3',  true],
+    ['qwen3-vl-235b',    'Qwen3 VL',  true],
+    ['deepseek-v4',      'DeepSeek',  false],
+    ['llama-4-maverick', 'Llama 4',   false]
+  ];
+  const modelsScroll = document.getElementById('modelsScroll');
+
+  function bindCheck(cb) {
+    cb.addEventListener('click', () => {
+      cb.classList.toggle('on');
+      cb.classList.remove('pop');
+      void cb.offsetWidth;
+      cb.classList.add('pop');
+    });
+  }
+
+  function addModelRow(id, name, vision, delay = 0) {
+    const row = document.createElement('div');
+    row.className = 'mrow';
+    row.style.animationDelay = delay + 'ms';
+    row.innerHTML =
+      `<span class="pill tiny" style="width:112px; height:22px; font-size:10px; background:rgba(255,27,27,0.28)"></span>
+       <span class="pill tiny" style="width:112px; height:22px; font-size:10px; background:rgba(25,255,0,0.25)"></span>
+       <button class="vcheck${vision ? ' on' : ''}"></button>`;
+    row.children[0].textContent = id;
+    row.children[1].textContent = name;
+    bindCheck(row.children[2]);
+    modelsScroll.appendChild(row);
+    return row;
+  }
+
+  /* Fetch Models — expand panel, show fetching dots, stream rows in */
+  let fetched = false;
+  document.getElementById('fetchBtn').addEventListener('click', () => {
+    if (fetched) return;
+    fetched = true;
+    formPanel.classList.add('expanded');
+    modelsScroll.innerHTML = '<div class="fetching"><span class="dots"><i></i><i></i><i></i></span></div>';
+    setTimeout(() => {
+      modelsScroll.innerHTML = '';
+      MODELS.forEach(([id, name, v], i) => addModelRow(id, name, v, i * 70));
+    }, 1400);
+  });
+
+  /* + — add a model manually */
+  const maddPop = document.getElementById('maddPop');
+  document.getElementById('maddBtn').addEventListener('click', () =>
+    maddPop.classList.toggle('open'));
+  document.getElementById('maddGo').addEventListener('click', () => {
+    const id = document.getElementById('maddId').value.trim();
+    const name = document.getElementById('maddName').value.trim();
+    if (!id || !name) return;
+    formPanel.classList.add('expanded');
+    modelsScroll.querySelector('.fetching')?.remove();
+    const row = addModelRow(id, name, false);
+    row.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    document.getElementById('maddId').value = '';
+    document.getElementById('maddName').value = '';
+    maddPop.classList.remove('open');
+  });
+</script>
+
+</body>
+</html>

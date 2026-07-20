@@ -114,6 +114,9 @@ function sunburstSVG(size) {
   }
   return `<svg class="sunburst" viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">${s}</svg>`;
 }
+// Figma prototype icons (figma-icons/, exported from the user's design)
+const ICON = (name, size, cls) =>
+  `<img class="ficon ${cls || ""}" src="figma-icons/figma-${name}.png" width="${size}" height="${size}" alt="${name}">`;
 
 // ============================================================
 //  RENDERING
@@ -142,20 +145,17 @@ function render() {
 function renderNav() {
   const el = document.createElement("div");
   el.className = "topbar";
+  const mid = view === "providers"
+    ? `<div class="providers-pill glass"><span>Providers</span></div>`
+    : `<div class="seg" data-sel="${view === "history" ? 1 : 0}">
+        <div class="lens glass"></div>
+        <button class="opt" data-nav="chat">Chat</button>
+        <button class="opt" data-nav="history">History</button>
+      </div>`;
   el.innerHTML = `
-    <div class="row">
-      <button class="icon-btn" data-act="toggle-history" title="Conversations">≡</button>
-      <button class="icon-btn" data-act="new-chat" title="New chat">＋</button>
-    </div>
-    <div class="nav-tabs">
-      <button data-nav="chat" class="${view === "chat" ? "active" : ""}">Chat</button>
-      <button data-nav="providers" class="${view === "providers" ? "active" : ""}">Providers</button>
-    </div>
-    <div class="theme-switch">
-      <button data-act="theme" data-theme="light" class="${theme === "light" ? "active" : ""}">Light</button>
-      <button data-act="theme" data-theme="dark" class="${theme === "dark" ? "active" : ""}">Dark</button>
-      <button data-act="theme" data-theme="system" class="${theme === "system" ? "active" : ""}">System</button>
-    </div>`;
+    <button class="logo-blob glass pressable" data-act="logo" title="${view === "providers" ? "Back to chat" : "Provider settings"}">${ICON("claude", 28)}</button>
+    ${mid}
+    <button class="icon-btn pressable" data-act="new-chat" title="New chat">${ICON("add-green", 34)}</button>`;
   return el;
 }
 
@@ -165,7 +165,16 @@ function renderProvidersView() {
   wrap.className = "scroll";
   const head = document.createElement("div");
   head.className = "between";
-  head.innerHTML = `<div class="brand"><div class="mark">C</div><h1>Providers</h1></div>`;
+  head.innerHTML = `
+    <div class="sec-pill glass"><span>List Providers</span></div>
+    <div class="row">
+      <div class="theme-switch">
+        <button data-act="theme" data-theme="light" class="${theme === "light" ? "active" : ""}">☀</button>
+        <button data-act="theme" data-theme="dark" class="${theme === "dark" ? "active" : ""}">☾</button>
+        <button data-act="theme" data-theme="system" class="${theme === "system" ? "active" : ""}">Auto</button>
+      </div>
+      <button class="icon-btn glass pressable" data-act="add" title="Add provider">${ICON("plus", 18)}</button>
+    </div>`;
   wrap.appendChild(head);
   wrap.appendChild(renderActiveBar());
   wrap.appendChild(renderProviderList());
@@ -174,7 +183,7 @@ function renderProvidersView() {
 }
 function renderActiveBar() {
   const el = document.createElement("div");
-  el.className = "card";
+  el.className = "card glass";
   const pairs = [];
   for (const p of state.providers) for (const m of p.models) pairs.push([p, m]);
   if (!pairs.length) { el.innerHTML = `<div class="muted" style="font-size:12px">No model active. Add a provider and fetch models, then pick one.</div>`; return el; }
@@ -189,49 +198,61 @@ function renderProviderList() {
   const el = document.createElement("div");
   el.className = "col";
   if (!state.providers.length) {
-    el.innerHTML = `<div class="card empty">No providers yet.<br><span class="muted">Add one — Anthropic, OpenAI, OpenRouter, GLM, MiniMax, Ollama… any OpenAI- or Anthropic-style endpoint.</span></div>`;
+    el.innerHTML = `<div class="card glass empty">No providers yet.<br><span class="muted">Tap ＋ above — Anthropic, OpenAI, OpenRouter, GLM, MiniMax, Ollama… any OpenAI- or Anthropic-style endpoint.</span></div>`;
   } else for (const p of state.providers) {
     const isActive = state.activeProviderId === p.id;
     const card = document.createElement("div");
-    card.className = "card";
+    card.className = "card glass";
     card.innerHTML = `
       <div class="between">
-        <div class="row"><strong>${esc(p.name) || "(unnamed)"}</strong><span class="badge">${p.style === "anthropic" ? "Anthropic-style" : "OpenAI-style"}</span>${isActive ? '<span class="badge active">active</span>' : ""}</div>
-        <div class="row"><button class="small ghost" data-act="edit" data-id="${p.id}">Edit</button><button class="small ghost" data-act="del" data-id="${p.id}">Delete</button></div>
+        <div class="row"><strong>${esc(p.name) || "(unnamed)"}</strong></div>
+        <div class="row"><button class="btn small good" data-act="edit" data-id="${p.id}">Edit</button><button class="btn small warn" data-act="del" data-id="${p.id}">Delete</button></div>
       </div>
-      <div class="muted" style="font-size:11px;word-break:break-all">${esc(p.baseUrl) || "—"} · ${p.models.length} model${p.models.length === 1 ? "" : "s"}</div>`;
+      <div class="row" style="flex-wrap:wrap">
+        <span class="badge">${p.style === "anthropic" ? "Anthropic-style" : "OpenAI-style"}</span>
+        <span class="badge">${p.models.length} model${p.models.length === 1 ? "" : "s"}</span>
+        ${isActive ? '<span class="badge active">Active</span>' : ""}
+      </div>
+      <div class="muted" style="font-size:11px;word-break:break-all">${esc(p.baseUrl) || "—"}</div>`;
     el.appendChild(card);
   }
-  const add = document.createElement("button");
-  add.className = "primary"; add.dataset.act = "add"; add.textContent = "＋ Add provider";
-  el.appendChild(add);
   return el;
 }
 function renderEditor() {
   const p = editing;
   const el = document.createElement("div");
-  el.className = "card editor";
+  el.className = "card glass editor";
   el.innerHTML = `
-    <div class="between"><h1 style="font-size:14px">Provider</h1><button class="small ghost" data-act="close">✕</button></div>
-    <div class="tabs"><button data-act="tab" data-tab="openai" class="${p.style === "openai" ? "active" : ""}">OpenAI-style</button><button data-act="tab" data-tab="anthropic" class="${p.style === "anthropic" ? "active" : ""}">Anthropic-style</button></div>
-    <div class="field"><label>Display name (shown in chat)</label><input data-f="name" placeholder="e.g. My OpenAI" value="${esc(p.name)}"></div>
-    <div class="field"><label>Base URL</label><input data-f="baseUrl" placeholder="https://api.openai.com/v1  or  https://api.anthropic.com" value="${esc(p.baseUrl)}"></div>
-    <div class="field"><label>API key</label><input data-f="apiKey" type="password" placeholder="sk-..." value="${esc(p.apiKey)}"></div>
-    <div class="row"><button data-act="test">Test connection</button><button data-act="fetch">Fetch models</button></div>
+    <div class="between"><h1 style="font-size:14px">Provider</h1><button class="btn small warn" data-act="close">✕</button></div>
+    <div class="ptype" data-sel="${p.style === "anthropic" ? 1 : 0}">
+      <div class="lens glass"></div>
+      <button class="opt" data-act="tab" data-tab="openai">OpenAI</button>
+      <button class="opt" data-act="tab" data-tab="anthropic">Anthropic</button>
+    </div>
+    <div class="field"><label>Display name <span style="opacity:.55;font-weight:400">(shown in chat)</span></label><input data-f="name" placeholder="E.g; My OpenAI" value="${esc(p.name)}"></div>
+    <div class="field"><label>Base URL</label><input data-f="baseUrl" placeholder="${p.style === "anthropic" ? "https://api.anthropic.com" : "https://api.openai.com/v1"}" value="${esc(p.baseUrl)}"></div>
+    <div class="field"><label>API KEY</label><input data-f="apiKey" type="password" placeholder="E.g; sk-****" value="${esc(p.apiKey)}"></div>
+    <div class="row" style="justify-content:center;margin-top:2px">
+      <button class="btn small warn" data-act="test">Test Connection</button>
+      <button class="btn small good" data-act="fetch">Fetch Models</button>
+      <button class="btn small good" data-act="manual" title="Add model manually">${ICON("plus", 14)}</button>
+    </div>
     <div data-status></div>
     <hr>
-    <div class="between"><strong>Models</strong><span class="muted" style="font-size:11px">id · display name · vision</span></div>
-    <div data-models></div>
-    <button data-act="manual" class="ghost small" style="align-self:flex-start">＋ Add model manually</button>
+    <div class="between"><strong>Models</strong><span class="muted" style="font-size:11px">id · name · vision</span></div>
+    <div data-models class="col" style="gap:6px"></div>
     <hr>
-    <div class="row"><button class="primary" data-act="save">Save provider</button><button class="ghost" data-act="cancel">Cancel</button></div>`;
+    <div class="row" style="justify-content:center">
+      <button class="btn good row" data-act="save" style="gap:6px">${ICON("done", 15)} Save</button>
+      <button class="btn warn row" data-act="cancel" style="gap:6px">${ICON("close", 13)} Cancel</button>
+    </div>`;
   renderModels(el);
   return el;
 }
 function renderModels(editorEl) {
   const p = editing, box = editorEl.querySelector("[data-models]");
-  if (!p.models.length) { box.innerHTML = `<div class="muted" style="font-size:11px">No models yet — click "Fetch models" or add manually.</div>`; return; }
-  box.innerHTML = p.models.map((m, i) => `<div class="model-row"><input data-mi="id" data-idx="${i}" placeholder="model id" value="${esc(m.id)}"><input data-mi="displayName" data-idx="${i}" placeholder="display name" value="${esc(m.displayName)}"><label class="check"><input type="checkbox" data-mi="vision" data-idx="${i}" ${m.vision ? "checked" : ""}>vision</label><button class="small ghost" data-act="rm-model" data-idx="${i}">✕</button></div>`).join("");
+  if (!p.models.length) { box.innerHTML = `<div class="muted" style="font-size:11px">No models yet — click "Fetch Models" or ＋ to add manually.</div>`; return; }
+  box.innerHTML = p.models.map((m, i) => `<div class="model-row"><input data-mi="id" data-idx="${i}" placeholder="model id" value="${esc(m.id)}"><input data-mi="displayName" data-idx="${i}" placeholder="display name" value="${esc(m.displayName)}"><label class="check" title="Vision"><input type="checkbox" data-mi="vision" data-idx="${i}" ${m.vision ? "checked" : ""}></label><button class="btn small warn" data-act="rm-model" data-idx="${i}">✕</button></div>`).join("");
 }
 
 // ---------- Chat view ----------
@@ -242,7 +263,7 @@ function renderChatView() {
   if (!pair) {
     const e = document.createElement("div");
     e.className = "chat-empty";
-    e.innerHTML = `${sunburstSVG(44)}<h1 class="serif">No provider set up</h1><p>Go to <strong data-nav="providers">Providers</strong> to add one.</p>`;
+    e.innerHTML = `<div class="hero glass">${ICON("clawd", 52)}</div><h1 class="serif">No provider set up</h1><p>Tap the logo (top-left) to open <strong data-act="logo">Providers</strong> and add one.</p>`;
     wrap.appendChild(e);
     wrap.appendChild(renderComposer(null));
     return wrap;
@@ -250,11 +271,11 @@ function renderChatView() {
   if (!chat.messages.length) {
     const empty = document.createElement("div");
     empty.className = "chat-empty";
-    empty.innerHTML = `${sunburstSVG(44)}<h1 class="serif">How can I help you today?</h1><p>Read the page, click, type, run JS, navigate your current tab — like a human.</p>
+    empty.innerHTML = `<div class="hero glass">${ICON("clawd", 52)}</div><h1 class="serif">How can I help you today?</h1><p>Read the page, click, type, run JS, navigate your current tab — like a human.</p>
       <div class="chips">
-        <button class="chip" data-act="quick-prompt" data-prompt="Solve all the questions on this page. For each coding question: read it, analyze, write the code into the site's editor, click Run, check the output matches the expected output shown in the question, then click Submit and click Next. For MCQs: pick the appropriate option, click Submit, then Next. Do this for every question without stopping to ask me. Track which question you're on and report progress between questions.">Solve all questions on this page</button>
-        <button class="chip" data-act="quick-prompt" data-prompt="Read this page and give me a concise summary of what it's about.">Read &amp; summarize</button>
-        <button class="chip" data-act="quick-prompt" data-prompt="Fill out the form on this page with reasonable values, then stop and tell me what you entered.">Fill the form</button>
+        <button class="chip glass pressable" data-act="quick-prompt" data-prompt="Solve all the questions on this page. For each coding question: read it, analyze, write the code into the site's editor, click Run, check the output matches the expected output shown in the question, then click Submit and click Next. For MCQs: pick the appropriate option, click Submit, then Next. Do this for every question without stopping to ask me. Track which question you're on and report progress between questions.">Solve the questions</button>
+        <button class="chip glass pressable" data-act="quick-prompt" data-prompt="Read this page and give me a concise summary of what it's about.">Summarize this page</button>
+        <button class="chip glass pressable" data-act="quick-prompt" data-prompt="Fill out the form on this page with reasonable values, then stop and tell me what you entered.">Fill the form</button>
       </div>`;
     wrap.appendChild(empty);
   } else {
@@ -267,26 +288,48 @@ function renderChatView() {
   wrap.appendChild(renderComposer(pair));
   return wrap;
 }
+function assistantMeta() {
+  const pair = activePair();
+  const name = pair ? esc(pair.m.displayName || pair.m.id) : "";
+  return `<div class="meta">${name ? `<span class="tag">${name}</span>` : ""}<button class="copy-mini" data-act="copy" title="Copy">${ICON("copy", 15)}</button></div>`;
+}
 function renderMessage(msg) {
   const el = document.createElement("div");
   el.className = "msg " + msg.role;
-  if (msg.role === "user") el.innerHTML = `<div class="bubble">${esc(msg.content)}</div><div class="actions"><button data-act="copy">Copy</button></div>`;
-  else el.innerHTML = `<div class="content">${renderAssistant(msg.content)}</div><div class="actions"><button data-act="copy">Copy</button></div>`;
+  if (msg.role === "user")
+    el.innerHTML = `${ICON("batman", 25, "avatar")}<div class="bubble glass">${esc(msg.content)}</div>`;
+  else
+    el.innerHTML = `${ICON("clawd", 22, "avatar")}<div class="content">${renderAssistant(msg.content)}</div>${assistantMeta()}`;
   return el;
 }
+const SNIP_ICON = ICON("control", 22);
+const ATTACH_ICON = ICON("add-circle", 24);
 function renderComposer(pair) {
   const w = document.createElement("div");
   w.className = "composer-wrap";
-  const modelChip = pair ? `<div class="model-chip" data-nav="providers" title="Switch model">${esc(pair.m.displayName || pair.m.id)} ⌄</div>` : "";
+  const modelChip = pair ? `<div class="model-chip glass" data-act="logo" title="Switch model">${esc(pair.m.displayName || pair.m.id)} ⌄</div>` : `<div class="model-chip glass" data-act="logo">No model ⌄</div>`;
   const stop = chat.busy;
   const sendClass = stop ? "send stop" : "send send-off";
   const sendAct = stop ? 'data-act="stop"' : 'data-act="send"';
   const icon = stop
-    ? '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>'
-    : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg>';
-  const attachChip = chat.attachment ? `<div class="attach-chip" title="${esc(chat.attachment.name)}">${chat.attachment.image ? "🖼" : "📎"} ${esc(chat.attachment.name)} <button class="attach-x" data-act="remove-attach">✕</button></div>` : "";
-  const effortSel = `<select class="effort-sel" data-act="effort" title="Reasoning effort"><option value="off" ${chat.effort === "off" ? "selected" : ""}>⚡Off</option><option value="low" ${chat.effort === "low" ? "selected" : ""}>⚡Low</option><option value="medium" ${chat.effort === "medium" ? "selected" : ""}>⚡Med</option><option value="high" ${chat.effort === "high" ? "selected" : ""}>⚡High</option></select>`;
-  w.innerHTML = `${attachChip ? `<div class="attach-row">${attachChip}</div>` : ""}<div class="composer">${modelChip}${effortSel}<button class="icon-btn" data-act="attach" title="Attach a file">＋</button><button class="icon-btn" data-act="snip" title="Snip a screen region">✂</button><textarea data-chat="input" placeholder="How can I help you today?" rows="1"></textarea><button class="${sendClass}" ${sendAct}>${icon}</button></div><input type="file" data-act="attach-input" hidden><div class="composer-hint">Enter to send · Shift+Enter for newline${chat.attachment ? " · " + (chat.attachment.image ? "🖼 image attached" : "📎 attached") : ""}</div>`;
+    ? '<svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>'
+    : ICON("claude", 18);
+  const attachChip = chat.attachment ? `<div class="attach-chip glass" title="${esc(chat.attachment.name)}">${chat.attachment.image ? "🖼" : "📎"} ${esc(chat.attachment.name)} <button class="attach-x" data-act="remove-attach">✕</button></div>` : "";
+  const thinkOn = chat.effort !== "off";
+  const think = `<div class="think ${thinkOn ? "on" : ""}" data-act="think" title="Extended thinking on/off"><span class="tl">Thinking</span><div class="tswitch"><div class="tthumb glass"></div></div></div>`;
+  w.innerHTML = `${attachChip ? `<div class="attach-row">${attachChip}</div>` : ""}
+    <div class="composer glass">
+      <textarea data-chat="input" placeholder="How can I help u today..?" rows="1"></textarea>
+      <div class="c-row">
+        <button class="icon-glyph" data-act="snip" title="Snip a screen region">${SNIP_ICON}</button>
+        ${modelChip}
+        ${think}
+        <button class="icon-glyph" data-act="attach" title="Attach a file">${ATTACH_ICON}</button>
+        <button class="${sendClass}" ${sendAct}>${icon}</button>
+      </div>
+    </div>
+    <input type="file" data-act="attach-input" hidden>
+    <div class="composer-hint">Enter to send · Shift+Enter for newline${chat.attachment ? " · " + (chat.attachment.image ? "🖼 image attached" : "📎 attached") : ""}</div>`;
   return w;
 }
 
@@ -294,31 +337,28 @@ function renderComposer(pair) {
 function renderHistoryView() {
   const wrap = document.createElement("div");
   wrap.className = "scroll";
-  const head = document.createElement("div");
-  head.className = "between";
-  head.innerHTML = `<h1>Conversations</h1><button class="primary small" data-act="new-chat">＋ New chat</button>`;
-  wrap.appendChild(head);
   if (!convs.list.length) {
     const e = document.createElement("div");
-    e.className = "card empty";
+    e.className = "card glass empty";
     e.innerHTML = `No conversations yet.<br><span class="muted">Start a chat and it'll be saved here automatically.</span>`;
     wrap.appendChild(e);
     return wrap;
   }
-  for (const c of convs.list) {
+  convs.list.forEach((c, i) => {
     const card = document.createElement("div");
-    card.className = "card conv-row";
+    card.className = "card glass conv-row";
     card.dataset.act = "load-conv";
     card.dataset.id = c.id;
+    card.style.animationDelay = Math.min(i * 60, 420) + "ms";
     const isActive = c.id === convs.currentId;
     card.innerHTML = `
       <div class="between">
         <strong>${esc(c.title || "(untitled)")}</strong>
-        <button class="small ghost" data-act="del-conv" data-id="${c.id}">Delete</button>
+        <button class="icon-glyph" data-act="del-conv" data-id="${c.id}" title="Remove">${ICON("remove", 20)}</button>
       </div>
-      <div class="muted" style="font-size:11px">${new Date(c.updatedAt || c.createdAt || Date.now()).toLocaleString()} · ${c.messages.length} msg${c.messages.length === 1 ? "" : "s"}${isActive ? ' · <span style="color:var(--accent)">current</span>' : ""}</div>`;
+      <div class="muted" style="font-size:11px">${new Date(c.updatedAt || c.createdAt || Date.now()).toLocaleString()} · ${c.messages.length} msg${c.messages.length === 1 ? "" : "s"}${isActive ? ' · <span style="color:var(--accent-h)">current</span>' : ""}</div>`;
     wrap.appendChild(card);
-  }
+  });
   return wrap;
 }
 
@@ -469,7 +509,7 @@ function updateLiveAssistant() {
   // While streaming: plain text + cursor (no markdown re-parse => no scroll jumps).
   // When done: full markdown (applied on render()).
   const body = chat.busy ? renderPlain(msg.content) + '<span class="cursor"></span>' : renderAssistant(msg.content);
-  bubble.innerHTML = `<div class="content">${body}</div><div class="actions"><button data-act="copy">Copy</button></div>`;
+  bubble.innerHTML = `${ICON("clawd", 22, "avatar")}<div class="content">${body}</div>${chat.busy ? "" : assistantMeta()}`;
   // Only auto-scroll if the user is already near the bottom (don't yank if they scrolled up).
   const nearBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 140;
   if (nearBottom) log.scrollTop = log.scrollHeight;
@@ -879,16 +919,47 @@ async function captureScreenshot(tabId) {
 // ============================================================
 root.addEventListener("click", async (e) => {
   const nav = e.target.closest("[data-nav]");
-  if (nav) { view = nav.dataset.nav; render(); return; }
+  if (nav) {
+    const seg = nav.closest(".seg");
+    const target = nav.dataset.nav;
+    if (seg && view !== target) {
+      // slide the lens in place first (gel squish), then switch views mid-flight
+      seg.dataset.sel = target === "history" ? 1 : 0;
+      const lens = seg.querySelector(".lens");
+      if (lens) { lens.classList.remove("gel"); void lens.offsetWidth; lens.classList.add("gel"); }
+      setTimeout(() => { view = target; render(); }, 230);
+    } else { view = target; render(); }
+    return;
+  }
   const t = e.target.closest("[data-act]");
   if (!t) return;
   const { act, id, tab, idx, theme: th } = t.dataset;
   switch (act) {
+    case "logo": view = (view === "providers") ? "chat" : "providers"; render(); break;
+    case "think": {
+      // Figma spec: thinking on/off liquid switch (replaces the effort dropdown).
+      if (chat.effort === "off") chat.effort = chat.lastEffort || "medium";
+      else { chat.lastEffort = chat.effort; chat.effort = "off"; }
+      chrome.storage.local.set({ [EFFORT_KEY]: chat.effort });
+      t.classList.toggle("on", chat.effort !== "off");
+      const th2 = t.querySelector(".tthumb");
+      if (th2) { th2.classList.remove("gel"); void th2.offsetWidth; th2.classList.add("gel"); }
+      break;
+    }
     case "theme": await setTheme(th); break;
     case "add": editing = { id: uid(), name: "", style: "openai", baseUrl: "", apiKey: "", models: [] }; render(); break;
     case "edit": editing = JSON.parse(JSON.stringify(state.providers.find(p => p.id === id))); render(); break;
     case "del": if (confirm("Delete provider '" + (state.providers.find(p => p.id === id)?.name || "") + "'?")) { state.providers = state.providers.filter(p => p.id !== id); if (state.activeProviderId === id) { state.activeProviderId = null; state.activeModelId = null; } await persist(); render(); } break;
-    case "tab": if (editing) { editing.style = tab; render(); } break;
+    case "tab": if (editing && editing.style !== tab) {
+      editing.style = tab;
+      const pt = t.closest(".ptype");
+      if (pt) {
+        pt.dataset.sel = tab === "anthropic" ? 1 : 0;
+        const lens = pt.querySelector(".lens");
+        if (lens) { lens.classList.remove("gel"); void lens.offsetWidth; lens.classList.add("gel"); }
+        setTimeout(render, 260);
+      } else render();
+    } break;
     case "test": await doTest(); break;
     case "fetch": await doFetch(); break;
     case "manual": if (editing) { editing.models.push({ id: "", displayName: "", vision: false }); render(); } break;
@@ -902,7 +973,6 @@ root.addEventListener("click", async (e) => {
     case "remove-attach": chat.attachment = null; render(); break;
     case "new-chat": newChat(); break;
     case "quick-prompt": { const ta = root.querySelector('[data-chat="input"]'); if (ta) { ta.value = t.dataset.prompt; await sendPrompt(); } break; }
-    case "toggle-history": view = (view === "history") ? "chat" : "history"; render(); break;
     case "load-conv": loadConv(id); break;
     case "del-conv": if (confirm("Delete this conversation?")) deleteConv(id); break;
     case "copy": { const m = t.closest(".msg"); const txt = m?.querySelector(".content, .bubble")?.innerText || ""; try { await navigator.clipboard.writeText(txt); const o = t.textContent; t.textContent = "Copied"; setTimeout(() => { t.textContent = o; }, 900); } catch {} break; }
@@ -932,6 +1002,24 @@ root.addEventListener("keydown", (e) => {
 });
 
 // ---------- boot ----------
+// Inject the liquid-glass backdrop once, into <body> (survives #root re-renders):
+//  · SVG displacement filter used by .glass backdrop-filter: url(#liquid-lens)
+//  · four drifting glow orbs behind everything
+(function installGlassBackdrop() {
+  const defs = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  defs.setAttribute("class", "defs");
+  defs.innerHTML = `<filter id="liquid-lens" x="-5%" y="-5%" width="110%" height="110%" color-interpolation-filters="sRGB">
+    <feTurbulence type="fractalNoise" baseFrequency="0.008 0.008" numOctaves="2" seed="7" result="noise"/>
+    <feGaussianBlur in="noise" stdDeviation="2" result="soft"/>
+    <feDisplacementMap in="SourceGraphic" in2="soft" scale="70" xChannelSelector="R" yChannelSelector="G"/>
+  </filter>`;
+  document.body.insertBefore(defs, document.body.firstChild);
+  const orbs = document.createElement("div");
+  orbs.className = "orbs";
+  orbs.innerHTML = `<div class="orb o1"></div><div class="orb o2"></div><div class="orb o3"></div><div class="orb o4"></div>`;
+  document.body.insertBefore(orbs, document.body.firstChild);
+})();
+
 load().then(render);
 initNetworkLogging();
 
