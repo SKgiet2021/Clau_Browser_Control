@@ -1,68 +1,117 @@
 {
-   "action": {
-      "default_title": "Open Claude"
-   },
-   "background": {
-      "service_worker": "service-worker-loader.js",
-      "type": "module"
-   },
-   "commands": {
-      "toggle-side-panel": {
-         "description": "Toggle Claude side panel",
-         "suggested_key": {
-            "default": "Ctrl+E",
-            "mac": "Command+E"
-         }
+  "action": {
+    "default_title": "Open Claude"
+  },
+  "background": {
+    "service_worker": "service-worker-loader.js",
+    "type": "module"
+  },
+  "commands": {
+    "toggle-side-panel": {
+      "description": "Toggle Claude side panel",
+      "suggested_key": {
+        "default": "Ctrl+E",
+        "mac": "Command+E"
       }
-   },
-   "content_scripts": [ {
-      "js": [ "nocdp-actor.js" ],
-      "matches": [ "<all_urls>" ],
+    }
+  },
+  "content_scripts": [
+    {
+      "js": [
+        "nocdp-actor.js"
+      ],
+      "matches": [
+        "<all_urls>"
+      ],
       "run_at": "document_start",
       "all_frames": false
-   }, {
-      "js": [ "assets/content-script.ts-loader-Dd0kPPVP.js" ],
-      "matches": [ "https://claude.ai/*", "https://*.claude.ai/*" ],
+    },
+    {
+      "js": [
+        "assets/content-script.ts-loader-Dd0kPPVP.js"
+      ],
+      "matches": [
+        "https://claude.ai/*",
+        "https://*.claude.ai/*"
+      ],
       "run_at": "document_end"
-   }, {
+    },
+    {
       "all_frames": true,
-      "js": [ "assets/accessibility-tree.js-B-oUarrX.js" ],
-      "matches": [ "\u003Call_urls>" ],
+      "js": [
+        "assets/accessibility-tree.js-B-oUarrX.js"
+      ],
+      "matches": [
+        "<all_urls>"
+      ],
       "run_at": "document_start"
-   }, {
-      "all_frames": false,
-      "js": [ "assets/agent-visual-indicator.js-D0xakyZv.js" ],
-      "matches": [ "\u003Call_urls>" ],
-      "run_at": "document_idle"
-   } ],
-   "content_security_policy": {
-      "extension_pages": "script-src 'self'; object-src 'self'; connect-src 'self' http: https: wss:; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:;"
-   },
-   "description": "Claude in Chrome",
-   "externally_connectable": {
-      "matches": [ "https://claude.ai/*", "https://*.claude.ai/*" ]
-   },
-   "host_permissions": [ "\u003Call_urls>" ],
-   "icons": {
-      "128": "icon-128.png"
-   },
-   "manifest_version": 3,
-   "minimum_chrome_version": "116",
-   "name": "Claude",
-   "options_page": "options.html",
-   "permissions": [ "sidePanel", "storage", "activeTab", "scripting", "debugger", "tabGroups", "tabs", "alarms", "notifications", "webNavigation", "declarativeNetRequest", "declarativeNetRequestWithHostAccess", "webRequest", "cookies", "offscreen", "nativeMessaging", "unlimitedStorage", "downloads", "identity" ],
-   "storage": {
-      "managed_schema": "managed_schema.json"
-   },
-   "update_url": "https://clients2.google.com/service/update2/crx",
-   "version": "1.0.81",
-   "web_accessible_resources": [ {
-      "matches": [ "https://*.claude.ai/*", "https://claude.ai/*" ],
-      "resources": [ "assets/onboarding-prompts-CJtFEMjA.js", "assets/content-script.ts-D0rMrCjG.js" ],
+    }
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; connect-src 'self' http: https: wss:; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:;"
+  },
+  "description": "Claude in Chrome",
+  "externally_connectable": {
+    "matches": [
+      "https://claude.ai/*",
+      "https://*.claude.ai/*"
+    ]
+  },
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "icons": {
+    "128": "icon-128.png"
+  },
+  "manifest_version": 3,
+  "minimum_chrome_version": "116",
+  "name": "Claude",
+  "options_page": "options.html",
+  "permissions": [
+    "sidePanel",
+    "storage",
+    "activeTab",
+    "scripting",
+    "debugger",
+    "tabGroups",
+    "tabs",
+    "alarms",
+    "notifications",
+    "webNavigation",
+    "declarativeNetRequest",
+    "declarativeNetRequestWithHostAccess",
+    "webRequest",
+    "cookies",
+    "offscreen",
+    "nativeMessaging",
+    "unlimitedStorage"
+  ],
+  "storage": {
+    "managed_schema": "managed_schema.json"
+  },
+  "update_url": "https://clients2.google.com/service/update2/crx",
+  "version": "1.0.81",
+  "web_accessible_resources": [
+    {
+      "matches": [
+        "https://*.claude.ai/*",
+        "https://claude.ai/*"
+      ],
+      "resources": [
+        "assets/onboarding-prompts-CJtFEMjA.js",
+        "assets/content-script.ts-D0rMrCjG.js"
+      ],
       "use_dynamic_url": false
-   }, {
-      "matches": [ "\u003Call_urls>" ],
-      "resources": [ "assets/accessibility-tree.js-B-oUarrX.js", "assets/agent-visual-indicator.js-D0xakyZv.js" ],
+    },
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "resources": [
+        "assets/accessibility-tree.js-B-oUarrX.js",
+        "assets/agent-visual-indicator.js-D0xakyZv.js"
+      ],
       "use_dynamic_url": false
-   } ]
+    }
+  ]
 }

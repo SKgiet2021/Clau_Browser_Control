@@ -28,3 +28,6 @@ node_modules/
 # ---- misc ----
 *.swp
 *.tmp
+
+# brain session persistence (runtime state)
+build/brain/sessions/

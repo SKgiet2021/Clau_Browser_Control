@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<!-- _dev_preview.html — TEMPORARY harness to preview sidepanel UI outside Chrome.
+     Stubs the chrome.* APIs and seeds fake providers/conversations. NOT part of the extension. -->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>sidepanel dev preview</title>
+<link rel="stylesheet" href="sidepanel.css">
+<style>html,body{width:400px;margin:0 auto;}</style>
+<script>
+  const SEED = {
+    nocdp_providers: {
+      providers: [{
+        id: "p_demo", name: "OllamaCloud", style: "openai",
+        baseUrl: "https://api.openai.com/v1", apiKey: "sk-demo",
+        models: [
+          { id: "claude-fable-5", displayName: "Fable 5", vision: true },
+          { id: "claude-opus-4-8", displayName: "Opus 4.8", vision: true },
+          { id: "claude-sonnet-5", displayName: "Sonnet 5", vision: false },
+        ],
+      }],
+      activeProviderId: "p_demo", activeModelId: "claude-opus-4-8",
+    },
+    nocdp_theme: "dark",
+    nocdp_conversations: {
+      currentId: "c1",
+      list: [
+        { id: "c1", title: "Yo, What's up", createdAt: Date.now() - 86400e3, updatedAt: Date.now() - 3600e3,
+          messages: [
+            { role: "user", content: "Yo, What's up....." },
+            { role: "assistant", content: "Nothing Much Just Hanging around" },
+            { role: "user", content: "Summarize this page for me" },
+            { role: "assistant", content: "[[tool:read_page#0]]\n[[tool:click#1]]\n[[tool:screenshot#2]]\n[[tool:eval#3]]\nHere's the gist: it's a **liquid-glass chat UI** for your browser agent — glass nav, chat history, and a provider manager.\n\n- Glass material everywhere\n- iOS gel-spring toggles\n- `backdrop-filter` refraction\n\nClean, green, and very Apple. 🌿",
+              tools: [
+                { id: "t_read", tool: "read_page", args: {}, status: "done", result: '{"url":"https://example.com","title":"Example Domain","viewport":{"w":1280,"h":800},"text":"Example Domain. This domain is for use in illustrative examples…","elements":[{"n":0,"tag":"A","role":null,"text":"More information...","selector":"a","x":640,"y":400,"w":120,"h":18},{"n":1,"tag":"BUTTON","role":"button","text":"Submit","selector":"button.submit","x":382,"y":52,"w":80,"h":30}]}', image: null, startedAt: Date.now() - 5200, endedAt: Date.now() - 5188, durMs: 312, open: false },
+                { id: "t_click", tool: "click", args: { n: 1, selector: "button.submit", text: "Submit", button: "left" }, status: "done", result: 'clicked #1 button.submit "Submit" →(382, 52) (left)', image: null, startedAt: Date.now() - 4900, endedAt: Date.now() - 4811, durMs: 89, open: true },
+                { id: "t_shot", tool: "screenshot", args: {}, status: "done", result: "screenshot 1280x800 (coordinates are image pixels, top-left origin 0,0; click tools use the same coordinate space)", image: "data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='240'%20height='150'%3E%3Crect%20width='240'%20height='150'%20fill='%23e9e3d6'/%3E%3Crect%20width='240'%20height='22'%20fill='%23a9432c'/%3E%3Ccircle%20cx='14'%20cy='11'%20r='4'%20fill='%23fff'/%3E%3Ccircle%20cx='30'%20cy='11'%20r='4'%20fill='%23fff'/%3E%3Ccircle%20cx='46'%20cy='11'%20r='4'%20fill='%23fff'/%3E%3Crect%20x='14'%20y='38'%20width='180'%20height='14'%20fill='%237a8a5e'%20rx='3'/%3E%3Crect%20x='14'%20y='62'%20width='130'%20height='10'%20fill='%23999'%20rx='2'/%3E%3Crect%20x='14'%20y='80'%20width='160'%20height='10'%20fill='%23999'%20rx='2'/%3E%3Crect%20x='14'%20y='98'%20width='90'%20height='10'%20fill='%23999'%20rx='2'/%3E%3C/svg%3E", startedAt: Date.now() - 4700, endedAt: Date.now() - 4160, durMs: 540, open: true },
+                { id: "t_eval", tool: "eval", args: { code: "document.querySelector('.nope').click()" }, status: "error", result: "tool error: Cannot read properties of null (reading 'click')", image: null, startedAt: Date.now() - 4100, endedAt: Date.now() - 4055, durMs: 45, open: false },
+              ] },
+          ] },
+        { id: "c2", title: "VPS setup", createdAt: Date.now() - 2 * 86400e3, updatedAt: Date.now() - 2 * 86400e3, messages: [{ role: "user", content: "hardening checklist?" }] },
+        { id: "c3", title: "Scraper project", createdAt: Date.now() - 3 * 86400e3, updatedAt: Date.now() - 3 * 86400e3, messages: [{ role: "user", content: "playwright vs the anti-bot wall" }] },
+      ],
+    },
+    nocdp_effort: "off",
+  };
+  window.chrome = {
+    storage: {
+      local: {
+        get: async (keys) => { const out = {}; (Array.isArray(keys) ? keys : [keys]).forEach(k => { if (k in SEED) out[k] = SEED[k]; }); return out; },
+        set: async (obj) => Object.assign(SEED, obj),
+      },
+      session: {
+        _s: {},
+        get: async function (keys) { const out = {}; (Array.isArray(keys) ? keys : [keys]).forEach(k => { if (k in this._s) out[k] = this._s[k]; }); return out; },
+        set: async function (obj) { Object.assign(this._s, obj); },
+        remove: async function (k) { delete this._s[k]; },
+      },
+      onChanged: { addListener() {} },
+    },
+    tabs: {
+      query: async () => [{ id: 1, title: "Demo tab", url: "https://example.com", active: true, windowId: 1 }],
+      get: async (id) => ({ id, active: true, windowId: 1, status: "complete" }),
+      update: async () => {}, create: async () => ({ id: 2 }), remove: async () => {},
+      onRemoved: { addListener() {} },
+      sendMessage: async () => { throw new Error("no actor in preview"); },
+      captureVisibleTab: async () => { throw new Error("no capture in preview"); },
+    },
+    debugger: { onDetach: { addListener() {} }, attach: async () => {}, detach() {}, sendCommand: async () => ({}) },
+    scripting: { executeScript: async () => [{ result: null }] },
+    alarms: { create: async () => {}, clear: async () => true, getAll: async () => [] },
+    runtime: { sendMessage: async () => ({ ok: true, _stub: true }), getURL: (p) => p, onMessage: { addListener() {} } },
+    notifications: { create: () => {} },
+    windows: { create: async () => ({ id: 99, tabs: [{ id: 1 }] }), remove: async () => {}, getCurrent: async () => ({ id: 99 }), update: async () => {} },
+  };
+</script>
+</head>
+<body>
+<div id="root"></div>
+<script src="agent-core.js"></script>
+<script src="sidepanel.js"></script>
+</body>
+</html>

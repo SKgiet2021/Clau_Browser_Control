@@ -13,26 +13,106 @@ const uid = () => "p_" + Math.random().toString(36).slice(2, 10) + Date.now().to
 let state = { providers: [], activeProviderId: null, activeModelId: null };
 let theme = "dark";
 let editing = null;
+let secOpen = false;
 let view = "chat";
 
-let chat = { messages: [], busy: false, sessionId: null, evtSource: null, attachment: null, effort: "off" };
+let chat = { messages: [], busy: false, sessionId: null, evtSource: null, coreSession: null, attachment: null, effort: "off", ctx: null, usage: null };
 let thinkingEl = null;
 let convs = { list: [], currentId: null };
+const pageCache = new Map();   // tabId -> { url, sig, text, elements } for read_page DOM-diff
+
+// ---------- scheduled tasks ----------
+// Stored under nocdp_tasks; alarms "nocdp_task_<id>" fire in nocdp-scheduler.js (service
+// worker), which opens a work window + this panel as a popup runner (?task=<id>&tabId=<n>).
+const TASKS_KEY = "nocdp_tasks";
+let tasks = { list: [] };      // { id, name, prompt, url, kind:"interval"|"daily", every, at, enabled, lastRun, lastStatus }
+let taskEditing = null;        // task object being edited in the Tasks view (null = closed)
+let scheduledRun = null;       // the task driving THIS panel instance (runner mode)
+let schedError = false;        // did the scheduled run hit an error event?
+async function saveTasks() { await chrome.storage.local.set({ [TASKS_KEY]: tasks }); }
+// Keep this schedule math in sync with nocdpRescheduleAll() in nocdp-scheduler.js.
+async function scheduleTaskAlarm(t) {
+  const name = "nocdp_task_" + t.id;
+  try { await chrome.alarms.clear(name); } catch {}
+  if (!t.enabled) return;
+  try {
+    if (t.kind === "daily") {
+      const [h, m] = String(t.at || "09:00").split(":").map(Number);
+      const next = new Date(); next.setHours(h || 0, m || 0, 0, 0);
+      if (next.getTime() <= Date.now()) next.setDate(next.getDate() + 1);
+      await chrome.alarms.create(name, { when: next.getTime(), periodInMinutes: 1440 });
+    } else {
+      const every = Math.max(1, +t.every || 30);   // chrome.alarms minimum is 1 minute
+      await chrome.alarms.create(name, { periodInMinutes: every, delayInMinutes: every });
+    }
+  } catch (e) { console.error("[tasks] alarm failed:", e); }
+}
+
+// ---------- key vault (passphrase-based AES-GCM encryption at rest) ----------
+// Providers' apiKeys are encrypted in chrome.storage.local with a key derived (PBKDF2) from a
+// passphrase the user sets. The passphrase is held in chrome.storage.session (per-extension,
+// cleared on browser restart) so keys stay decrypted in memory for a session; on restart the
+// panel shows an unlock screen. The brain always receives the plaintext key at /api/start time.
+const VAULT_KEY = "nocdp_vault";
+const SESSION_KEY = "nocdp_passphrase";
+let vault = { enabled: false, salt: null, canary: null };
+let vaultKey = null;     // derived CryptoKey, in-memory when unlocked
+let locked = false;      // vault enabled but not yet unlocked this session
+const b64enc = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf)));
+const b64dec = (s) => { const bin = atob(s); const u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i); return u; };
+const encU8 = (s) => new TextEncoder().encode(s);
+async function deriveVaultKey(passphrase, saltB64) {
+  const baseKey = await crypto.subtle.importKey("raw", encU8(passphrase), "PBKDF2", false, ["deriveKey"]);
+  return crypto.subtle.deriveKey({ name: "PBKDF2", salt: b64dec(saltB64), iterations: 210000, hash: "SHA-256" }, baseKey, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
+}
+async function vaultEncrypt(plaintext, key) {
+  const k = key || vaultKey; if (!k) return String(plaintext);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, k, encU8(String(plaintext)));
+  return b64enc(iv.buffer) + ":" + b64enc(ct);
+}
+async function vaultDecrypt(blob, key) {
+  const k = key || vaultKey; if (!k) return String(blob);
+  const parts = String(blob).split(":"); if (parts.length !== 2) return String(blob);   // plaintext (not encrypted)
+  try { const pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv: b64dec(parts[0]) }, k, b64dec(parts[1]).buffer); return new TextDecoder().decode(pt); }
+  catch { return null; }
+}
+async function decryptedApiKey(p) {
+  if (!p || !p.apiKey) return "";
+  if (!vault.enabled) return p.apiKey;
+  if (!vaultKey) return "";
+  return (await vaultDecrypt(p.apiKey)) ?? "";
+}
 
 const root = document.getElementById("root");
 
 // ---------- storage ----------
 async function load() {
-  const got = await chrome.storage.local.get([KEY, THEME_KEY, CONV_KEY, EFFORT_KEY]);
+  const got = await chrome.storage.local.get([KEY, THEME_KEY, CONV_KEY, EFFORT_KEY, VAULT_KEY, TASKS_KEY]);
   state = got[KEY] || { providers: [], activeProviderId: null, activeModelId: null };
   if (!state.providers) state.providers = [];
   theme = got[THEME_KEY] || "dark";
   convs = got[CONV_KEY] || { list: [], currentId: null };
   if (!convs.list) convs.list = [];
+  convs.currentId = null; // always open to a fresh New Chat; previous conversations stay in History
+  chat.messages = [];
   chat.effort = got[EFFORT_KEY] || "off";
+  tasks = got[TASKS_KEY] || { list: [] };
+  if (!tasks.list) tasks.list = [];
+  vault = got[VAULT_KEY] || { enabled: false, salt: null, canary: null };
+  locked = false; vaultKey = null;
+  if (vault.enabled && vault.salt) {
+    try {
+      const sess = await chrome.storage.session.get([SESSION_KEY]);
+      const pp = sess && sess[SESSION_KEY];
+      if (pp) vaultKey = await deriveVaultKey(pp, vault.salt);
+    } catch {}
+    locked = !vaultKey;
+  }
   applyTheme();
 }
 async function persist() { await chrome.storage.local.set({ [KEY]: state }); }
+async function persistVault() { await chrome.storage.local.set({ [VAULT_KEY]: vault }); }
 async function persistConvs() { await chrome.storage.local.set({ [CONV_KEY]: convs }); }
 async function setTheme(t) { theme = t; applyTheme(); await chrome.storage.local.set({ [THEME_KEY]: t }); render(); }
 function applyTheme() { const d = document.documentElement; if (theme === "system") delete d.dataset.theme; else d.dataset.theme = theme; }
@@ -94,15 +174,161 @@ function mdToHtml(src) {
   h = h.replace(/<br>(<\/?(?:h\d|ul|pre))/g, "$1").replace(/(<\/(?:h\d|ul|pre)>)<br>/g, "$1");
   return h;
 }
-function renderAssistant(content) {
+function renderAssistant(content, tools) {
   const parts = content.split(/(\[\[tool:[^\]]+\]\])/);
   let html = "";
   for (const part of parts) {
     const tm = part.match(/^\[\[tool:([^\]]+)\]\]$/);
-    if (tm) html += `<div class="tooltag"><span class="dot">●</span> ${esc(tm[1])}</div>`;
+    if (tm) html += renderToolCardMarker(tm[1], tools);
     else html += mdToHtml(part);
   }
   return html;
+}
+// ---- tool-call activity cards ----
+// Tool calls are embedded in the assistant content as `[[tool:name#idx]]` markers
+// (preserves streaming order + history persistence). The structured data lives in a
+// `tools` array on the assistant message; the marker's idx points into it. If the
+// array is missing (old history), we fall back to the legacy `.tooltag` pill.
+const trunc = (s, n) => { s = String(s ?? ""); return s.length > n ? s.slice(0, n) + "…" : s; };
+const fmtK = (n) => { n = Math.max(0, Math.floor(n || 0)); return n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1).replace(/\.0$/, "") + "k" : String(n); };
+const ctxColor = (pct) => pct > 85 ? "#d4604a" : pct > 60 ? "#d4a84a" : "#6a9a7a";
+const ctxPctOf = (ctx) => ctx && ctx.limit ? Math.min(100, Math.round(ctx.used / ctx.limit * 100)) : 0;
+function ctxRingHTML(ctx) {
+  const pct = ctxPctOf(ctx);
+  return `<div class="ctx-ring" data-act="ctx" style="--ctx-pct:${pct};--ctx-col:${ctxColor(pct)}" title="Context window: ${ctx ? fmtK(ctx.used) + " / " + fmtK(ctx.limit) + " tokens (" + pct + "%)" : "Context usage will appear here once the agent starts"}"><div class="ctx-ring-inner"><span class="ctx-pct">${ctx ? pct + "%" : ""}</span></div></div>`;
+}
+function updateCtxRing() {
+  const el = root.querySelector(".ctx-ring");
+  if (!el) return;
+  const pct = ctxPctOf(chat.ctx);
+  el.style.setProperty("--ctx-pct", pct);
+  el.style.setProperty("--ctx-col", ctxColor(pct));
+  el.title = chat.ctx ? "Context window: " + fmtK(chat.ctx.used) + " / " + fmtK(chat.ctx.limit) + " tokens (" + pct + "%)" : "Context usage will appear here once the agent starts";
+  const span = el.querySelector(".ctx-pct");
+  if (span) span.textContent = chat.ctx ? pct + "%" : "";
+}
+function usageHudHTML(u) {
+  if (!u || (!u.total && !u.turns)) return `<span class="usage-hud muted" title="Real token usage will appear here once the agent starts">—</span>`;
+  const parts = [];
+  if (u.turns) parts.push(u.turns + " turn" + (u.turns > 1 ? "s" : ""));
+  if (u.toolCalls) parts.push(u.toolCalls + " action" + (u.toolCalls > 1 ? "s" : ""));
+  if (u.total) parts.push(fmtK(u.total) + " tok");
+  return `<span class="usage-hud" title="Real token usage this session (from the provider): ` + fmtK(u.input || 0) + ` in · ` + fmtK(u.output || 0) + ` out">` + parts.join(" · ") + `</span>`;
+}
+function updateUsageHud() {
+  const el = root.querySelector(".usage-hud");
+  if (!el) return;
+  const u = chat.usage;
+  if (!u || (!u.total && !u.turns)) { el.textContent = "—"; el.classList.add("muted"); el.title = "Real token usage will appear here once the agent starts"; return; }
+  const parts = [];
+  if (u.turns) parts.push(u.turns + " turn" + (u.turns > 1 ? "s" : ""));
+  if (u.toolCalls) parts.push(u.toolCalls + " action" + (u.toolCalls > 1 ? "s" : ""));
+  if (u.total) parts.push(fmtK(u.total) + " tok");
+  el.textContent = parts.join(" · ");
+  el.classList.remove("muted");
+  el.title = "Real token usage this session (from the provider): " + fmtK(u.input || 0) + " in · " + fmtK(u.output || 0) + " out";
+}
+const TC_ICON = (inner) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${inner}</svg>`;
+const CHEV_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>`;
+const SHIELD = '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>';
+const TOOL_META = {
+  read_page:        { name: "Read page",     icon: TC_ICON('<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 13h8"/><path d="M8 17h8"/>') },
+  get_text:         { name: "Get text",      icon: TC_ICON('<path d="M4 7V4h16v3"/><path d="M9 20h6"/><path d="M12 4v16"/>') },
+  screenshot:       { name: "Screenshot",   icon: TC_ICON('<path d="M3 7h3l2-3h8l2 3h3v12H3z"/><circle cx="12" cy="13" r="3.5"/>') },
+  click:            { name: "Click",         icon: TC_ICON('<path d="m3 3 7.07 16.97 2.51-7.39 7.39-2.51L3 3z"/><path d="m13 13 6 6"/>') },
+  type:             { name: "Type",         icon: TC_ICON('<rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M6 14h12"/>') },
+  press_key:        { name: "Press key",    icon: TC_ICON('<rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10"/>') },
+  scroll:           { name: "Scroll",        icon: TC_ICON('<rect x="6" y="3" width="12" height="18" rx="6"/><path d="M12 7v4"/>') },
+  navigate:         { name: "Navigate",     icon: TC_ICON('<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>') },
+  new_tab:          { name: "New tab",      icon: TC_ICON('<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><path d="M15 3h6v6"/><path d="M10 14 21 3"/>') },
+  switch_tab:       { name: "Switch tab",   icon: TC_ICON('<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/>') },
+  close_tab:        { name: "Close tab",    icon: TC_ICON('<circle cx="12" cy="12" r="9"/><path d="m15 9-6 6M9 9l6 6"/>') },
+  list_tabs:        { name: "List tabs",    icon: TC_ICON('<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/><path d="M9 21V9"/>') },
+  attached_file:    { name: "Attached file",icon: TC_ICON('<path d="M21.44 11.05l-9.19 9.19a5 5 0 0 1-7.07-7.07l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>') },
+  upload_file:      { name: "Upload file",  icon: TC_ICON('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 9l5-5 5 5"/><path d="M12 4v12"/>') },
+  eval:             { name: "Run JS",       icon: TC_ICON('<polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>') },
+  real_move:        { name: "Move · trusted",icon: TC_ICON('<path d="M5 9l-3 3 3 3M9 5l3-3 3 3M15 19l-3 3-3-3M19 9l3 3-3 3M2 12h20M12 2v20"/>') },
+  real_click:       { name: "Click · trusted",icon: TC_ICON(SHIELD + '<path d="m9 6 3 5 4-2-2 7 5 1-9 2-3-5-4 2 2-7z"/>') },
+  real_type:        { name: "Type · trusted",icon: TC_ICON(SHIELD) },
+  real_key:         { name: "Key · trusted",icon: TC_ICON(SHIELD) },
+  real_scroll:      { name: "Scroll · trusted",icon: TC_ICON(SHIELD + '<rect x="9" y="3" width="6" height="14" rx="3"/>') },
+  get_cookies:      { name: "Get cookies",  icon: TC_ICON('<path d="M21 12a9 9 0 1 1-9-9 4 4 0 0 0 4 4 4 4 0 0 0 4 4z"/><circle cx="9" cy="11" r="1"/><circle cx="14" cy="14" r="1"/>') },
+  set_cookie:       { name: "Set cookie",   icon: TC_ICON('<path d="M21 12a9 9 0 1 1-9-9 4 4 0 0 0 4 4 4 4 0 0 0 4 4z"/><path d="M9 12l2 2 4-4"/>') },
+  delete_cookie:    { name: "Delete cookie",icon: TC_ICON('<path d="M21 12a9 9 0 1 1-9-9 4 4 0 0 0 4 4 4 4 0 0 0 4 4z"/><path d="m14 9-4 6M10 9l4 6"/>') },
+  list_network:     { name: "Network log",  icon: TC_ICON('<path d="M5 12.55a11 11 0 0 1 14 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><path d="M12 20h.01"/>') },
+  get_network_request:{ name: "Get request",icon: TC_ICON('<path d="M5 12.55a11 11 0 0 1 14 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><path d="M12 20h.01"/>') },
+  set_request_header:{name: "Set header",   icon: TC_ICON('<path d="M4 7h16M4 12h16M4 17h10"/>') },
+  block_url:        { name: "Block URL",    icon: TC_ICON('<circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/>') },
+  clear_net_rules:  { name: "Clear rules",  icon: TC_ICON('<path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>') },
+};
+const TOOL_META_DEFAULT = { name: "Tool", icon: TC_ICON('<circle cx="12" cy="12" r="9"/><path d="M12 8v4M12 16h.01"/>') };
+function toolArgsSummary(tool, args) {
+  const a = args || {};
+  const t = String(a.text ?? "");
+  switch (tool) {
+    case "click": case "real_click": {
+      if (a.n != null) return "#" + a.n + (a.text ? " " + trunc('"' + a.text + '"', 22) : "");
+      if (a.selector) return trunc(a.selector, 32);
+      return `(${a.x}, ${a.y})${a.button && a.button !== "left" ? " " + a.button : ""}`;
+    }
+    case "real_move": return `(${a.x}, ${a.y})`;
+    case "type": return a.selector ? `${a.selector} = "${trunc(t, 28)}"` : `"${trunc(t, 28)}"`;
+    case "real_type": return `"${trunc(t, 28)}"`;
+    case "press_key": case "real_key": return a.key || "";
+    case "scroll": case "real_scroll": return `dx=${a.dx || 0} dy=${a.dy || 0}`;
+    case "navigate": case "new_tab": return trunc(a.url || "", 38);
+    case "switch_tab": case "close_tab": return `tab ${a.tabId ?? ""}`;
+    case "get_text": return a.selector || "";
+    case "eval": return trunc(a.code || "", 38);
+    case "upload_file": return a.selector || "input[type=file]";
+    case "set_cookie": case "delete_cookie": return a.name || "";
+    case "get_cookies": return a.url || a.domain || "";
+    case "set_request_header": return a.header || "";
+    case "block_url": return a.urlFilter || "";
+    case "get_network_request": return a.id != null ? String(a.id) : "";
+    case "read_page": case "screenshot": case "attached_file":
+    case "list_tabs": case "list_network": case "clear_net_rules": return "";
+    default: return "";
+  }
+}
+function renderToolCardMarker(marker, tools) {
+  const m = marker.match(/^([^#]+)#(\d+)$/);
+  if (m) {
+    const tc = tools && tools[+m[2]];
+    if (tc) return renderToolCard(tc);
+  }
+  return `<div class="tooltag"><span class="dot">●</span> ${esc(marker.split("#")[0])}</div>`;
+}
+function renderToolCard(tc) {
+  const meta = TOOL_META[tc.tool] || TOOL_META_DEFAULT;
+  const args = toolArgsSummary(tc.tool, tc.args);
+  const dur = tc.durMs != null ? (tc.durMs < 1000 ? tc.durMs + "ms" : (tc.durMs / 1000).toFixed(1) + "s") : "";
+  const statusLabel = tc.status === "running" ? "running" : tc.status === "error" ? "error" : "done";
+  const result = tc.result || "";
+  const resultShort = result.length > 1200 ? result.slice(0, 1200) + "\n… (" + result.length + " chars)" : result;
+  const shot = tc.image ? `<img class="tc-shot" data-act="shot-zoom" src="${tc.image}" alt="screenshot">` : "";
+  const hasArgs = tc.args && typeof tc.args === "object" && Object.keys(tc.args).length;
+  const body = tc.open ? `<div class="tc-body">
+    ${hasArgs ? `<div class="tc-args-full">${esc(JSON.stringify(tc.args, null, 2))}</div>` : ""}
+    ${result ? `<div class="tc-result ${tc.status === "error" ? "error" : ""}">${esc(resultShort)}</div>` : ""}
+    ${shot}
+  </div>` : "";
+  return `<div class="toolcard ${tc.open ? "open" : ""}">
+    <div class="tc-head" data-act="tc-toggle" data-tc="${esc(tc.id)}">
+      <span class="tc-ico">${meta.icon}</span>
+      <span class="tc-name">${esc(meta.name)}</span>
+      ${args ? `<span class="tc-args">${esc(args)}</span>` : ""}
+      <span class="tc-spacer"></span>
+      ${dur ? `<span class="tc-dur">${dur}</span>` : ""}
+      <span class="tc-status ${tc.status}"><span class="tc-dot"></span>${statusLabel}</span>
+      <span class="tc-chev">${CHEV_SVG}</span>
+    </div>
+    ${body}
+  </div>`;
+}
+function findToolCard(id) {
+  for (const m of chat.messages) if (m.tools) for (const tc of m.tools) if (tc.id === id) return tc;
+  return null;
 }
 function sunburstSVG(size) {
   let s = "";
@@ -122,6 +348,7 @@ const ICON = (name, size, cls) =>
 //  RENDERING
 // ============================================================
 function render() {
+  if (locked) { root.innerHTML = ""; root.appendChild(renderUnlock()); const pi = root.querySelector('[data-act="pp-input"]'); if (pi) { pi.focus(); pi.addEventListener("keydown", (e) => { if (e.key === "Enter") root.querySelector('[data-act="unlock"]')?.click(); }); } return; }
   // preserve chat scroll across the rebuild (prevents the top->bottom flash on long convos)
   const oldLog = root.querySelector(".chat-log");
   let saveScroll = null;
@@ -133,7 +360,7 @@ function render() {
   root.appendChild(renderNav());
   const v = document.createElement("div");
   v.className = "view " + view;
-  v.appendChild(view === "providers" ? renderProvidersView() : view === "history" ? renderHistoryView() : renderChatView());
+  v.appendChild(view === "providers" ? renderProvidersView() : view === "history" ? renderHistoryView() : view === "tasks" ? renderTasksView() : renderChatView());
   root.appendChild(v);
   if (view === "chat") {
     const ta = v.querySelector('[data-chat="input"]'); if (ta && !chat.busy) ta.focus();
@@ -142,11 +369,32 @@ function render() {
   }
 }
 
+function renderUnlock() {
+  const el = document.createElement("div");
+  el.className = "chat-view";
+  el.innerHTML = `<div class="chat-empty" style="gap:14px">
+    <div class="hero">${ICON("clawd", 52)}</div>
+    <h1 class="serif">Keys are locked</h1>
+    <p>Enter your passphrase to decrypt your provider API keys for this session.</p>
+    <div class="unlock-box glass">
+      <input data-act="pp-input" type="password" placeholder="Passphrase" autocomplete="current-password">
+      <div class="row" style="justify-content:center;gap:8px;margin-top:10px">
+        <button class="btn good" data-act="unlock">Unlock</button>
+      </div>
+      <div data-status style="min-height:16px;margin-top:8px;font-size:11px"></div>
+      <button class="linkish" data-act="reset-vault" style="margin-top:6px">Forgot passphrase? Reset vault (re-enter keys)</button>
+    </div>
+  </div>`;
+  return el;
+}
+
 function renderNav() {
   const el = document.createElement("div");
   el.className = "topbar";
   const mid = view === "providers"
     ? `<div class="providers-pill glass"><span>Providers</span></div>`
+    : view === "tasks"
+    ? `<div class="providers-pill glass"><span>Scheduled Tasks</span></div>`
     : `<div class="seg" data-sel="${view === "history" ? 1 : 0}">
         <div class="lens glass"></div>
         <button class="opt" data-nav="chat">Chat</button>
@@ -166,7 +414,7 @@ function renderProvidersView() {
   const head = document.createElement("div");
   head.className = "between";
   head.innerHTML = `
-    <div class="sec-pill glass"><span>List Providers</span></div>
+    <div class="sec-pill glass"><span>Providers</span></div>
     <div class="row">
       <div class="theme-switch">
         <button data-act="theme" data-theme="light" class="${theme === "light" ? "active" : ""}">☀</button>
@@ -174,10 +422,13 @@ function renderProvidersView() {
         <button data-act="theme" data-theme="system" class="${theme === "system" ? "active" : ""}">Auto</button>
       </div>
       <button class="icon-btn glass pressable" data-act="add" title="Add provider">${ICON("plus", 18)}</button>
+      <button class="icon-btn glass pressable ${vault.enabled ? "on" : ""}" data-act="sec" title="Key encryption: ${vault.enabled ? "ON — click to manage" : "off — click to enable"}">${TC_ICON('<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/><circle cx="12" cy="15.5" r=".8"/>')}</button>
+      <button class="icon-btn glass pressable" data-act="tasks-view" title="Scheduled tasks">${TC_ICON('<circle cx="12" cy="13" r="7.5"/><path d="M12 9.5V13l2.5 2"/><path d="M5.2 3.2 3 5.4M18.8 3.2 21 5.4"/>')}</button>
     </div>`;
   wrap.appendChild(head);
   wrap.appendChild(renderActiveBar());
   wrap.appendChild(renderProviderList());
+  if (secOpen) wrap.appendChild(renderSecurity());
   if (editing) wrap.appendChild(renderEditor());
   return wrap;
 }
@@ -212,9 +463,36 @@ function renderProviderList() {
         <span class="badge">${p.style === "anthropic" ? "Anthropic-style" : "OpenAI-style"}</span>
         <span class="badge">${p.models.length} model${p.models.length === 1 ? "" : "s"}</span>
         ${isActive ? '<span class="badge active">Active</span>' : ""}
-      </div>
-      <div class="muted" style="font-size:11px;word-break:break-all">${esc(p.baseUrl) || "—"}</div>`;
+      </div>`;
     el.appendChild(card);
+  }
+  return el;
+}
+function renderSecurity() {
+  const el = document.createElement("div");
+  el.className = "card glass editor";
+  if (vault.enabled) {
+    el.innerHTML = `
+    <div class="between"><h1 style="font-size:14px">🔒 Key encryption <span class="badge good">ON</span></h1><button class="btn small warn" data-act="sec-close">✕</button></div>
+    <p class="muted" style="font-size:12px">API keys are encrypted at rest. You'll enter your passphrase once per browser restart to unlock.</p>
+    <div class="field"><label>Current passphrase <span class="muted" style="font-weight:400">(required)</span></label><input data-sec="cur" type="password" placeholder="Current passphrase" autocomplete="current-password"></div>
+    <div class="field"><label>New passphrase</label><input data-sec="pp" type="password" placeholder="New passphrase" autocomplete="new-password"></div>
+    <div class="field"><label>Confirm</label><input data-sec="pp2" type="password" placeholder="Repeat new passphrase" autocomplete="new-password"></div>
+    <div data-status style="min-height:16px;font-size:11px"></div>
+    <div class="row" style="justify-content:center;gap:8px;margin-top:6px">
+      <button class="btn good" data-act="sec-change">Change passphrase</button>
+      <button class="btn warn" data-act="sec-disable">Turn off</button>
+    </div>`;
+  } else {
+    el.innerHTML = `
+    <div class="between"><h1 style="font-size:14px">🔒 Key encryption</h1><button class="btn small warn" data-act="sec-close">✕</button></div>
+    <p class="muted" style="font-size:12px">Set a passphrase to encrypt your provider API keys at rest (AES-GCM + PBKDF2, 210k iterations). You'll enter it once per browser restart to unlock.</p>
+    <div class="field"><label>Passphrase</label><input data-sec="pp" type="password" placeholder="Choose a passphrase" autocomplete="new-password"></div>
+    <div class="field"><label>Confirm</label><input data-sec="pp2" type="password" placeholder="Repeat passphrase" autocomplete="new-password"></div>
+    <div data-status style="min-height:16px;font-size:11px"></div>
+    <div class="row" style="justify-content:center;gap:8px;margin-top:6px">
+      <button class="btn good" data-act="sec-enable">Enable encryption</button>
+    </div>`;
   }
   return el;
 }
@@ -231,7 +509,7 @@ function renderEditor() {
     </div>
     <div class="field"><label>Display name <span style="opacity:.55;font-weight:400">(shown in chat)</span></label><input data-f="name" placeholder="E.g; My OpenAI" value="${esc(p.name)}"></div>
     <div class="field"><label>Base URL</label><input data-f="baseUrl" placeholder="${p.style === "anthropic" ? "https://api.anthropic.com" : "https://api.openai.com/v1"}" value="${esc(p.baseUrl)}"></div>
-    <div class="field"><label>API KEY</label><input data-f="apiKey" type="password" placeholder="E.g; sk-****" value="${esc(p.apiKey)}"></div>
+    <div class="field"><label>API KEY <button class="reveal-btn" data-act="reveal-key" type="button" title="Show / hide">👁</button></label><input data-f="apiKey" type="password" placeholder="E.g; sk-****" value="${esc(p.apiKey)}"></div>
     <div class="row" style="justify-content:center;margin-top:2px">
       <button class="btn small warn" data-act="test">Test Connection</button>
       <button class="btn small good" data-act="fetch">Fetch Models</button>
@@ -252,7 +530,7 @@ function renderEditor() {
 function renderModels(editorEl) {
   const p = editing, box = editorEl.querySelector("[data-models]");
   if (!p.models.length) { box.innerHTML = `<div class="muted" style="font-size:11px">No models yet — click "Fetch Models" or ＋ to add manually.</div>`; return; }
-  box.innerHTML = p.models.map((m, i) => `<div class="model-row"><input data-mi="id" data-idx="${i}" placeholder="model id" value="${esc(m.id)}"><input data-mi="displayName" data-idx="${i}" placeholder="display name" value="${esc(m.displayName)}"><label class="check" title="Vision"><input type="checkbox" data-mi="vision" data-idx="${i}" ${m.vision ? "checked" : ""}></label><button class="btn small warn" data-act="rm-model" data-idx="${i}">✕</button></div>`).join("");
+  box.innerHTML = p.models.map((m, i) => `<div class="model-row"><input data-mi="id" data-idx="${i}" placeholder="model id" value="${esc(m.id)}"><input data-mi="displayName" data-idx="${i}" placeholder="display name" value="${esc(m.displayName)}"><input data-mi="ctxWindow" data-idx="${i}" type="number" min="1000" step="1000" class="ctx-input" placeholder="ctx 200000" value="${m.ctxWindow ? esc(m.ctxWindow) : ""}" title="Context window (tokens) — the ring in the composer fills against this"><label class="check" title="Vision"><input type="checkbox" data-mi="vision" data-idx="${i}" ${m.vision ? "checked" : ""}></label><button class="btn small warn" data-act="rm-model" data-idx="${i}">✕</button></div>`).join("");
 }
 
 // ---------- Chat view ----------
@@ -263,7 +541,7 @@ function renderChatView() {
   if (!pair) {
     const e = document.createElement("div");
     e.className = "chat-empty";
-    e.innerHTML = `<div class="hero glass">${ICON("clawd", 52)}</div><h1 class="serif">No provider set up</h1><p>Tap the logo (top-left) to open <strong data-act="logo">Providers</strong> and add one.</p>`;
+    e.innerHTML = `<div class="hero">${ICON("clawd", 52)}</div><h1 class="serif">No provider set up</h1><p>Tap the logo (top-left) to open <strong data-act="logo">Providers</strong> and add one.</p>`;
     wrap.appendChild(e);
     wrap.appendChild(renderComposer(null));
     return wrap;
@@ -271,7 +549,7 @@ function renderChatView() {
   if (!chat.messages.length) {
     const empty = document.createElement("div");
     empty.className = "chat-empty";
-    empty.innerHTML = `<div class="hero glass">${ICON("clawd", 52)}</div><h1 class="serif">How can I help you today?</h1><p>Read the page, click, type, run JS, navigate your current tab — like a human.</p>
+    empty.innerHTML = `<div class="hero">${ICON("clawd", 52)}</div><h1 class="serif">How can I help you today?</h1><p>Read the page, click, type, run JS, navigate your current tab — like a human.</p>
       <div class="chips">
         <button class="chip glass pressable" data-act="quick-prompt" data-prompt="Solve all the questions on this page. For each coding question: read it, analyze, write the code into the site's editor, click Run, check the output matches the expected output shown in the question, then click Submit and click Next. For MCQs: pick the appropriate option, click Submit, then Next. Do this for every question without stopping to ask me. Track which question you're on and report progress between questions.">Solve the questions</button>
         <button class="chip glass pressable" data-act="quick-prompt" data-prompt="Read this page and give me a concise summary of what it's about.">Summarize this page</button>
@@ -299,7 +577,7 @@ function renderMessage(msg) {
   if (msg.role === "user")
     el.innerHTML = `${ICON("batman", 25, "avatar")}<div class="bubble glass">${esc(msg.content)}</div>`;
   else
-    el.innerHTML = `${ICON("clawd", 22, "avatar")}<div class="content">${renderAssistant(msg.content)}</div>${assistantMeta()}`;
+    el.innerHTML = `${ICON("clawd", 22, "avatar")}<div class="content">${renderAssistant(msg.content, msg.tools)}</div>${assistantMeta()}`;
   return el;
 }
 const SNIP_ICON = ICON("control", 22);
@@ -321,6 +599,7 @@ function renderComposer(pair) {
     <div class="composer glass">
       <textarea data-chat="input" placeholder="How can I help u today..?" rows="1"></textarea>
       <div class="c-row">
+        ${ctxRingHTML(chat.ctx)}
         <button class="icon-glyph" data-act="snip" title="Snip a screen region">${SNIP_ICON}</button>
         ${modelChip}
         ${think}
@@ -329,7 +608,7 @@ function renderComposer(pair) {
       </div>
     </div>
     <input type="file" data-act="attach-input" hidden>
-    <div class="composer-hint">Enter to send · Shift+Enter for newline${chat.attachment ? " · " + (chat.attachment.image ? "🖼 image attached" : "📎 attached") : ""}</div>`;
+    <div class="composer-hint"><span class="trusted-badge ${attachedTabs.size ? "on" : ""}" data-act="trusted" title="${attachedTabs.size ? "Trusted control ACTIVE — Chrome debugger attached (real_* mode). Chrome shows a 'debugging' banner on those tabs. Click for details." : "Stealth mode — real DOM events, no debugger, no banner. Lights up if the agent escalates to trusted (real_*) input."}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${SHIELD}<path d="m9 12 2 2 4-4"/></svg></span><span class="hint-left">Enter to send · Shift+Enter for newline${chat.attachment ? " · " + (chat.attachment.image ? "🖼 image attached" : "📎 attached") : ""}</span>${usageHudHTML(chat.usage)}</div>`;
   return w;
 }
 
@@ -362,6 +641,77 @@ function renderHistoryView() {
   return wrap;
 }
 
+// ---------- Scheduled Tasks view ----------
+function describeSchedule(t) {
+  if (t.kind === "daily") return "daily at " + (t.at || "09:00");
+  const every = Math.max(1, +t.every || 30);
+  return every >= 60 && every % 60 === 0 ? "every " + (every / 60) + "h" : "every " + every + "m";
+}
+function renderTasksView() {
+  const wrap = document.createElement("div");
+  wrap.className = "scroll";
+  const head = document.createElement("div");
+  head.className = "between";
+  head.innerHTML = `
+    <div class="sec-pill glass"><span>Scheduled Tasks</span></div>
+    <button class="icon-btn glass pressable" data-act="task-add" title="New scheduled task">${ICON("plus", 18)}</button>`;
+  wrap.appendChild(head);
+  const note = document.createElement("div");
+  note.className = "muted";
+  note.style.cssText = "font-size:11px;padding:0 4px";
+  note.textContent = "Runs while Chrome is open: opens the page in a background window, runs the prompt with the agent (no confirmations), saves the transcript to History, and notifies you.";
+  wrap.appendChild(note);
+  if (!tasks.list.length && !taskEditing) {
+    const e = document.createElement("div");
+    e.className = "card glass empty";
+    e.innerHTML = `No scheduled tasks yet.<br><span class="muted">Tap ＋ to schedule a prompt — e.g. "every morning, open HN and summarize the top 5".</span>`;
+    wrap.appendChild(e);
+  }
+  tasks.list.forEach((t, i) => {
+    const card = document.createElement("div");
+    card.className = "card glass conv-row";
+    card.style.animationDelay = Math.min(i * 60, 420) + "ms";
+    card.innerHTML = `
+      <div class="between">
+        <strong>${esc(t.name || "(untitled task)")}</strong>
+        <div class="row" style="gap:6px">
+          <button class="btn small good" data-act="task-run" data-id="${t.id}" title="Run now">▶</button>
+          <button class="btn small ${t.enabled ? "good" : "warn"}" data-act="task-toggle" data-id="${t.id}" title="${t.enabled ? "On — click to pause" : "Paused — click to enable"}">${t.enabled ? "On" : "Off"}</button>
+          <button class="icon-glyph" data-act="task-edit" data-id="${t.id}" title="Edit">✎</button>
+          <button class="icon-glyph" data-act="task-del" data-id="${t.id}" title="Delete">${ICON("remove", 20)}</button>
+        </div>
+      </div>
+      <div class="muted" style="font-size:11px">${describeSchedule(t)} · ${esc(trunc(t.url || "current page", 34))}${t.lastRun ? " · last: " + new Date(t.lastRun).toLocaleString() + (t.lastStatus === "error" ? ' · <span class="bad">failed</span>' : " ✓") : ""}</div>
+      <div class="muted" style="font-size:11px;opacity:.75">${esc(trunc(t.prompt || "", 90))}</div>`;
+    wrap.appendChild(card);
+  });
+  if (taskEditing) wrap.appendChild(renderTaskEditor());
+  return wrap;
+}
+function renderTaskEditor() {
+  const t = taskEditing;
+  const el = document.createElement("div");
+  el.className = "card glass editor";
+  el.innerHTML = `
+    <div class="between"><h1 style="font-size:14px">Scheduled Task</h1><button class="btn small warn" data-act="task-close">✕</button></div>
+    <div class="field"><label>Name</label><input data-tf="name" placeholder="E.g; Morning HN digest" value="${esc(t.name)}"></div>
+    <div class="field"><label>Prompt <span style="opacity:.55;font-weight:400">(what the agent should do)</span></label><textarea data-tf="prompt" rows="3" placeholder="E.g; Read this page and summarize the top 5 stories.">${esc(t.prompt)}</textarea></div>
+    <div class="field"><label>Start URL <span style="opacity:.55;font-weight:400">(page to open first — optional)</span></label><input data-tf="url" placeholder="https://news.ycombinator.com" value="${esc(t.url)}"></div>
+    <div class="ptype" data-sel="${t.kind === "daily" ? 1 : 0}">
+      <div class="lens glass"></div>
+      <button class="opt" data-act="task-kind" data-kind="interval">Every N min</button>
+      <button class="opt" data-act="task-kind" data-kind="daily">Daily at</button>
+    </div>
+    ${t.kind === "daily"
+      ? `<div class="field"><label>Time (24h)</label><input data-tf="at" type="time" value="${esc(t.at || "09:00")}"></div>`
+      : `<div class="field"><label>Interval (minutes, min 1)</label><input data-tf="every" type="number" min="1" placeholder="30" value="${esc(String(t.every || 30))}"></div>`}
+    <div class="row" style="justify-content:center">
+      <button class="btn good row" data-act="task-save" style="gap:6px">${ICON("done", 15)} Save</button>
+      <button class="btn warn row" data-act="task-cancel" style="gap:6px">${ICON("close", 13)} Cancel</button>
+    </div>`;
+  return el;
+}
+
 // ---------- chat actions ----------
 function setStatus(cls, msg) { const s = root.querySelector("[data-status]"); if (s) s.innerHTML = `<div class="status ${cls}">${esc(msg)}</div>`; }
 async function doTest() {
@@ -376,19 +726,101 @@ async function doFetch() {
   try {
     const ids = await getModels(editing);
     const known = new Set(editing.models.map(m => m.id));
-    for (const id of ids) if (!known.has(id)) editing.models.push({ id, displayName: id, vision: guessVision(id) });
+    for (const id of ids) if (!known.has(id)) editing.models.push({ id, displayName: id, vision: guessVision(id), ctxWindow: guessCtx(id) });
     setStatus("ok", `Fetched ${ids.length} models. Review names + vision below.`);
     render();
   } catch (e) { setStatus("bad", "Fetch failed: " + e.message + " (you can add models manually)"); }
 }
 async function doSave() {
   editing.models = editing.models.filter(m => m.id);
+  // If the vault is enabled, encrypt the apiKey before persisting (stored as "iv:ct" blob).
+  if (vault.enabled && vaultKey && editing.apiKey) {
+    try { editing.apiKey = await vaultEncrypt(editing.apiKey); } catch {}
+  }
   const existing = state.providers.find(x => x.id === editing.id);
   if (existing) Object.assign(existing, editing); else state.providers.push({ ...editing });
   if (!state.activeProviderId) { state.activeProviderId = editing.id; if (editing.models[0]) state.activeModelId = editing.models[0].id; }
   await persist(); editing = null; render();
 }
 function guessVision(id) { const s = (id || "").toLowerCase(); return /(gpt-4o|gpt-4-vision|gpt-4o-mini|vision|claude-3|claude-4|claude-sonnet|claude-opus|claude-haiku|gemini|glm-4v|glm-4\.6v|minimax|abab|qwen-vl|llava|internvl)/.test(s); }
+
+// Enable encryption (first time) or change the passphrase. Encrypts every provider's plaintext key.
+async function enableOrChangeVault() {
+  const pp = root.querySelector('[data-sec="pp"]')?.value || "";
+  const pp2 = root.querySelector('[data-sec="pp2"]')?.value || "";
+  const st = root.querySelector('.editor [data-status]') || root.querySelector('[data-status]');
+  const bad = (m) => { if (st) st.innerHTML = `<span class="bad">${m}</span>`; };
+  // Changing an EXISTING passphrase requires proving you know the current one —
+  // an unlocked panel alone must not be enough to re-key the vault.
+  if (vault.enabled) {
+    const cur = root.querySelector('[data-sec="cur"]')?.value || "";
+    if (!cur) return bad("Enter your current passphrase first.");
+    const curKey = await deriveVaultKey(cur, vault.salt);
+    if (await vaultDecrypt(vault.canary, curKey) !== "valid") return bad("Current passphrase is wrong.");
+    vaultKey = curKey;   // decrypt below with the verified key
+  }
+  if (!pp) return bad("Enter a passphrase.");
+  if (pp.length < 4) return bad("Use at least 4 characters.");
+  if (pp !== pp2) return bad("Passphrases don't match.");
+  const salt = b64enc(crypto.getRandomValues(new Uint8Array(16)).buffer);
+  const newKey = await deriveVaultKey(pp, salt);
+  for (const p of state.providers) {
+    if (!p.apiKey) continue;
+    const plain = vault.enabled && vaultKey ? await vaultDecrypt(p.apiKey, vaultKey) : p.apiKey;
+    if (plain != null) p.apiKey = await vaultEncrypt(plain, newKey);
+  }
+  vault = { enabled: true, salt, canary: await vaultEncrypt("valid", newKey) };
+  vaultKey = newKey; locked = false;
+  await persist(); await persistVault();
+  try { await chrome.storage.session.set({ [SESSION_KEY]: pp }); } catch {}
+  secOpen = false; render();
+}
+// Turn encryption off: decrypt every key back to plaintext and clear the vault.
+// Also gated on the current passphrase — same reasoning as changing it.
+async function disableVault() {
+  const st = root.querySelector('.editor [data-status]') || root.querySelector('[data-status]');
+  const cur = root.querySelector('[data-sec="cur"]')?.value || "";
+  if (!cur) { if (st) st.innerHTML = `<span class="bad">Enter your current passphrase first.</span>`; return; }
+  const curKey = await deriveVaultKey(cur, vault.salt);
+  if (await vaultDecrypt(vault.canary, curKey) !== "valid") { if (st) st.innerHTML = `<span class="bad">Current passphrase is wrong.</span>`; return; }
+  vaultKey = curKey;
+  if (!confirm("Turn off encryption? Your API keys will be stored in plaintext again.")) return;
+  for (const p of state.providers) {
+    if (!p.apiKey) continue;
+    const plain = await vaultDecrypt(p.apiKey, vaultKey);
+    if (plain != null) p.apiKey = plain;
+  }
+  vault = { enabled: false, salt: null, canary: null };
+  vaultKey = null; locked = false;
+  try { await chrome.storage.session.remove(SESSION_KEY); } catch {}
+  await persist(); await persistVault();
+  secOpen = false; render();
+}
+// Unlock screen: derive a candidate key, verify the canary, then keep it for the session.
+async function tryUnlock() {
+  const inp = root.querySelector('[data-act="pp-input"]');
+  const st = root.querySelector('[data-status]');
+  const pp = inp ? inp.value : "";
+  if (!pp) { if (st) st.innerHTML = `<span class="bad">Enter your passphrase.</span>`; return; }
+  const key = await deriveVaultKey(pp, vault.salt);
+  const canary = await vaultDecrypt(vault.canary, key);
+  if (canary === "valid") {
+    vaultKey = key; locked = false;
+    try { await chrome.storage.session.set({ [SESSION_KEY]: pp }); } catch {}
+    render();
+  } else {
+    if (st) st.innerHTML = `<span class="bad">Wrong passphrase — try again.</span>`;
+    if (inp) inp.select();
+  }
+}
+function guessCtx(id) {
+  const s = (id || "").toLowerCase();
+  if (/(opus-4-8|opus-4\.8|\[1m\]|1m|1000k|gemini.*1\.5|gemini-2)/.test(s)) return 1000000;
+  if (/(gpt-5|gpt-4\.1|gpt-4o)/.test(s)) return 128000;
+  if (/(sonnet|haiku|claude-4|claude-3|o1|o3|o4)/.test(s)) return 200000;
+  if (/deepseek/.test(s)) return 128000;
+  return 200000;
+}
 
 async function getTabId() {
   const p = new URLSearchParams(location.search).get("tabId");
@@ -429,8 +861,32 @@ async function sendPrompt() {
   persistConvs();
   render();
 
-  const sessionId = crypto.randomUUID();
+  const isNewBrainSession = !conv.brainSessionId;
+  if (isNewBrainSession) { conv.brainSessionId = crypto.randomUUID(); persistConvs(); }
+  const sessionId = conv.brainSessionId;
   chat.sessionId = sessionId;
+
+  // Preferred path: the agent loop runs INSIDE the extension (agent-core.js) — no local
+  // server needed. Falls back to the legacy Node brain over SSE if AgentCore isn't loaded.
+  if (window.AgentCore) {
+    chat.coreSession = sessionId;
+    try {
+      const apiKey = await decryptedApiKey(pair.p);
+      await window.AgentCore.start({
+        sessionId, resume: !isNewBrainSession, messages, prompt,
+        effort: chat.effort,
+        provider: { name: pair.p.name, style: pair.p.style, baseUrl: pair.p.baseUrl, apiKey },
+        model: { id: pair.m.id, displayName: pair.m.displayName, vision: pair.m.vision, ctxWindow: pair.m.ctxWindow || 200000 },
+        onEvent: (e) => handleCoreEvent(sessionId, e),
+        onTool: async (e) => { const tc = appendToolCall(e); return await runToolLocally(e, tc); },
+      });
+    } catch (e) {
+      appendAssistant("⚠️ " + (e && e.message ? e.message : String(e)));
+      finishChat();
+    }
+    return;
+  }
+
   let started = false;
   const es = new EventSource(`${BRAIN}/api/events?sessionId=${sessionId}`);
   chat.evtSource = es;
@@ -438,9 +894,10 @@ async function sendPrompt() {
   es.onopen = async () => {
     started = true;
     try {
+      const apiKey = await decryptedApiKey(pair.p);
       const r = await fetch(`${BRAIN}/api/start`, {
         method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ sessionId, messages, prompt, tabId, effort: chat.effort, provider: { name: pair.p.name, style: pair.p.style, baseUrl: pair.p.baseUrl, apiKey: pair.p.apiKey }, model: { id: pair.m.id, displayName: pair.m.displayName, vision: pair.m.vision } }),
+        body: JSON.stringify({ sessionId, resume: !isNewBrainSession, messages, prompt, tabId, effort: chat.effort, provider: { name: pair.p.name, style: pair.p.style, baseUrl: pair.p.baseUrl, apiKey }, model: { id: pair.m.id, displayName: pair.m.displayName, vision: pair.m.vision, ctxWindow: pair.m.ctxWindow || 200000 } }),
       });
       const j = await r.json();
       if (!j.ok) { appendAssistant("⚠️ Brain refused the task: " + (j.error || "")); finishChat(); }
@@ -452,17 +909,33 @@ async function sendPrompt() {
   es.onerror = () => { if (!started) { appendAssistant("⚠️ Could not reach the brain. Is it running? (node build/brain/brain.js)"); finishChat(); } /* else auto-reconnect */ };
 }
 
+// Local (in-extension) event handler. Same events as the brain, except a `tool_call` event
+// here is display-only (the stuck-loop guard's skipped call) — real execution happens via onTool.
+function handleCoreEvent(sessionId, ev) {
+  if (sessionId !== chat.sessionId) return;
+  if (ev.type === "tool_call") {
+    const tc = appendToolCall(ev);
+    tc.status = "error"; tc.result = "skipped (stuck-loop guard)"; tc.endedAt = Date.now(); tc.durMs = 0;
+    updateLiveAssistant();
+    return;
+  }
+  handleBrainEvent(sessionId, ev);
+}
+
 function handleBrainEvent(sessionId, ev) {
   if (sessionId !== chat.sessionId) return;
   if (ev.type === "thinking") showThinking();
   else if (ev.type === "text") { clearThinking(); appendAssistant(ev.delta); }
   else if (ev.type === "tool_call") {
     clearThinking();
-    appendAssistant(`\n[[tool:${ev.tool}]]\n`);
-    executeToolAndReply(sessionId, ev);
+    const tc = appendToolCall(ev);
+    executeToolAndReply(sessionId, ev, tc);
   }
   else if (ev.type === "done") { clearThinking(); finishChat(); }
-  else if (ev.type === "error") { clearThinking(); appendAssistant("\n⚠️ " + ev.message + "\n"); finishChat(); }
+  else if (ev.type === "stuck") { clearThinking(); if (scheduledRun) schedError = true; appendAssistant("\n⏸️ Paused — the agent was repeating the same action without progress. Tell it what to try next, or rephrase the task.\n"); finishChat(); }
+  else if (ev.type === "error") { clearThinking(); if (scheduledRun) schedError = true; appendAssistant("\n⚠️ " + ev.message + "\n"); finishChat(); }
+  else if (ev.type === "context") { chat.ctx = { used: ev.used || 0, limit: ev.limit || 1 }; updateCtxRing(); }
+  else if (ev.type === "usage") { chat.usage = ev; updateUsageHud(); }
 }
 
 function showThinking() {
@@ -486,12 +959,26 @@ function appendAssistant(delta) {
   else last.content += delta;
   updateLiveAssistant();
 }
-function renderPlain(content) {
+// Append a structured tool-call record to the current assistant message and drop a
+// `[[tool:name#idx]]` marker into the content so the renderer places the card inline.
+// Returns the record so executeToolAndReply can update its status on completion.
+function appendToolCall(ev) {
+  let msg = chat.messages.length ? chat.messages[chat.messages.length - 1] : null;
+  if (!msg || msg.role !== "assistant") { msg = { role: "assistant", content: "", tools: [] }; chat.messages.push(msg); }
+  if (!msg.tools) msg.tools = [];
+  const idx = msg.tools.length;
+  const tc = { id: ev.id || uid(), tool: ev.tool, args: ev.args || {}, status: "running", result: "", image: null, startedAt: Date.now(), endedAt: null, durMs: null, open: false };
+  msg.tools.push(tc);
+  msg.content += `\n[[tool:${ev.tool}#${idx}]]\n`;
+  updateLiveAssistant();
+  return tc;
+}
+function renderPlain(content, tools) {
   const parts = content.split(/(\[\[tool:[^\]]+\]\])/);
   let html = "";
   for (const part of parts) {
     const tm = part.match(/^\[\[tool:([^\]]+)\]\]$/);
-    if (tm) html += `<div class="tooltag"><span class="dot">●</span> ${esc(tm[1])}</div>`;
+    if (tm) html += renderToolCardMarker(tm[1], tools);
     else html += esc(part).replace(/\n/g, "<br>");
   }
   return html;
@@ -508,7 +995,7 @@ function updateLiveAssistant() {
   const msg = chat.messages[chat.messages.length - 1];
   // While streaming: plain text + cursor (no markdown re-parse => no scroll jumps).
   // When done: full markdown (applied on render()).
-  const body = chat.busy ? renderPlain(msg.content) + '<span class="cursor"></span>' : renderAssistant(msg.content);
+  const body = chat.busy ? renderPlain(msg.content, msg.tools) + '<span class="cursor"></span>' : renderAssistant(msg.content, msg.tools);
   bubble.innerHTML = `${ICON("clawd", 22, "avatar")}<div class="content">${body}</div>${chat.busy ? "" : assistantMeta()}`;
   // Only auto-scroll if the user is already near the bottom (don't yank if they scrolled up).
   const nearBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 140;
@@ -519,18 +1006,21 @@ function finishChat() {
   chat.busy = false;
   try { chat.evtSource && chat.evtSource.close(); } catch {}
   chat.evtSource = null;
+  chat.coreSession = null;
   persistConvs();
   render();
+  if (scheduledRun) finalizeScheduledRun();   // runner mode: notify + close windows
 }
 async function stopChat() {
-  try { await fetch(`${BRAIN}/api/stop`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ sessionId: chat.sessionId }) }); } catch {}
+  if (window.AgentCore && chat.coreSession) { try { window.AgentCore.stop(chat.coreSession); } catch {} }
+  else { try { await fetch(`${BRAIN}/api/stop`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ sessionId: chat.sessionId }) }); } catch {} }
   appendAssistant("\n_(stopped)_");
   finishChat();
 }
-function newChat() { convs.currentId = null; chat.messages = []; chat.attachment = null; persistConvs(); view = "chat"; render(); }
+function newChat() { convs.currentId = null; chat.messages = []; chat.attachment = null; chat.ctx = null; chat.usage = null; persistConvs(); view = "chat"; render(); }
 function loadConv(id) {
   const c = convs.list.find(x => x.id === id); if (!c) return;
-  convs.currentId = id; chat.messages = c.messages; view = "chat"; persistConvs(); render();
+  convs.currentId = id; chat.messages = c.messages; chat.ctx = null; chat.usage = null; view = "chat"; persistConvs(); render();
 }
 function deleteConv(id) {
   convs.list = convs.list.filter(c => c.id !== id);
@@ -592,38 +1082,125 @@ async function doCrop(dataUrl, imgEl, r) {
 }
 
 // ---------- tool executor (no-CDP) ----------
-async function executeToolAndReply(sessionId, ev) {
+// Confirmation gate — pause for a human OK before irreversible / destructive tool calls.
+// Lives in the extension so it survives the brain→extension fold. Autonomous runs
+// (scheduled tasks) set confirmGate=false to skip prompting.
+let confirmGate = true;
+function confirmMessage(name, a) {
+  a = a || {};
+  switch (name) {
+    case "navigate":      return "Navigate this tab to:\n" + (a.url || "(unknown url)");
+    case "close_tab":     return "Close tab " + (a.tabId ?? "(active)") + "?";
+    case "eval":          return "Run this JavaScript on the page?\n\n" + String(a.code || "").slice(0, 300);
+    case "set_cookie":    return "Set cookie \"" + (a.name || "") + "\" on " + (a.url || a.domain || "this site") + "?";
+    case "delete_cookie": return "Delete cookie \"" + (a.name || "") + "\"?";
+    default:              return null;
+  }
+}
+// Run one tool locally: confirmation gate → execute → update its activity card. Returns the result.
+// Shared by both the in-extension AgentCore path (onTool) and the legacy brain path.
+async function runToolLocally(ev, tc) {
   const tabId = await getTabId();
   let result = { content: "", isError: false };
   console.log("[tool] ->", ev.tool, "tabId:", tabId, "args:", ev.args);
-  if (tabId == null) {
+  const gateMsg = confirmGate ? confirmMessage(ev.tool, ev.args) : null;
+  if (gateMsg && !confirm("The agent wants to:\n\n" + gateMsg)) {
+    result = { content: "User declined this action at the confirmation prompt. Do not retry it — ask the user how they'd like to proceed instead.", isError: true };
+  } else if (tabId == null) {
     result = { content: "no target tab — the side panel could not resolve an active tab. Click on a normal web page tab, then retry.", isError: true };
   } else {
     try { result = await executeTool(ev.tool, ev.args || {}, tabId); }
     catch (e) { result = { content: "tool error: " + (e && e.message ? e.message : String(e)), isError: true }; }
   }
   console.log("[tool] <-", ev.tool, result.isError ? "ERROR" : "ok", ":", String(result.content).slice(0, 200), result.image ? "(+image)" : "");
+  if (tc) {
+    tc.status = result.isError ? "error" : "done";
+    tc.result = String(result.content ?? "");
+    tc.image = result.image || null;
+    tc.endedAt = Date.now();
+    tc.durMs = tc.endedAt - tc.startedAt;
+    updateLiveAssistant();
+  }
+  return result;
+}
+async function executeToolAndReply(sessionId, ev, tc) {
+  const result = await runToolLocally(ev, tc);
   try {
     await fetch(`${BRAIN}/api/tool_result`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ sessionId, id: ev.id, content: result.content, imageData: result.image || null, isError: result.isError }) });
   } catch (e) { console.error("[tool] failed to POST result:", e); }
 }
+// Fast stable hash of a read_page result so we can detect "page unchanged" without deep-comparing.
+function pageSig(r) {
+  let s = (r && r.url || "") + "|" + (r && r.text || "");
+  const els = (r && r.elements) || [];
+  for (const e of els) s += "|" + (e.selector || "") + ":" + (e.text || "") + "@" + e.x + "," + e.y + "," + e.w + "x" + e.h;
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+  return h;
+}
 function extractPageFn() {
+  const SEL = 'a,button, input, textarea, select, [role="button"], [contenteditable=""], [contenteditable="true"]';
+  const selFor = (el) => {
+    if (el.id) { try { if (document.querySelectorAll("#" + CSS.escape(el.id)).length === 1) return "#" + CSS.escape(el.id); } catch (_) {} }
+    const tid = el.getAttribute("data-testid") || el.getAttribute("data-test-id");
+    if (tid) { try { return '[data-testid="' + CSS.escape(tid) + '"]'; } catch (_) {} }
+    const parts = []; let cur = el, depth = 0;
+    while (cur && cur.nodeType === 1 && depth < 4) {
+      const tag = cur.tagName.toLowerCase();
+      const parent = cur.parentElement;
+      if (!parent) { parts.unshift(tag); break; }
+      const sibs = Array.prototype.filter.call(parent.children, (c) => c.tagName === cur.tagName);
+      parts.unshift(sibs.length === 1 ? tag : tag + ":nth-of-type(" + (Array.prototype.indexOf.call(sibs, cur) + 1) + ")");
+      cur = parent; depth++;
+      if (cur && cur.id) { try { if (document.querySelectorAll("#" + CSS.escape(cur.id)).length === 1) { parts.unshift("#" + CSS.escape(cur.id)); break; } } catch (_) {} }
+    }
+    return parts.join(" > ");
+  };
   const text = (document.body && document.body.innerText || "").slice(0, 6000);
   const els = [];
-  document.querySelectorAll('a,button, input, textarea, select, [role="button"], [contenteditable=""], [contenteditable="true"]').forEach((e) => {
+  document.querySelectorAll(SEL).forEach((e) => {
     const r = e.getBoundingClientRect();
     if (r.width === 0 || r.height === 0 || r.bottom < 0 || r.top > innerHeight) return;
     const t = (e.innerText || e.getAttribute("aria-label") || e.getAttribute("placeholder") || e.value || e.tagName).toString().slice(0, 40);
-    els.push({ i: els.length, tag: e.tagName, text: t, x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) });
+    els.push({ n: els.length, tag: e.tagName, role: e.getAttribute("role") || null, text: t, selector: selFor(e), x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2), w: Math.round(r.width), h: Math.round(r.height) });
     if (els.length >= 60) return;
   });
   return { url: location.href, title: document.title, viewport: { w: innerWidth, h: innerHeight }, text, elements: els };
+}
+// Resolve a click target (by read_page index `n` and/or `selector`) to its live center,
+// re-measured in-page at click time so scroll/layout shifts are handled. `text` verifies.
+// KEEP THE SEL SELECTOR + FILTER IN SYNC WITH extractPageFn ABOVE.
+function resolveClickFn(n, selector, text) {
+  const SEL = 'a,button, input, textarea, select, [role="button"], [contenteditable=""], [contenteditable="true"]';
+  let el = null;
+  if (selector) { try { el = document.querySelector(selector); } catch (_) { el = null; } }
+  if (!el && n != null) {
+    const els = [];
+    document.querySelectorAll(SEL).forEach((e) => {
+      const r = e.getBoundingClientRect();
+      if (r.width === 0 || r.height === 0 || r.bottom < 0 || r.top > innerHeight) return;
+      els.push(e);
+    });
+    el = els[n];
+  }
+  if (!el) return { ok: false, error: "element not found (n=" + n + ", selector=" + selector + ")" };
+  const r = el.getBoundingClientRect();
+  const got = (el.innerText || el.getAttribute("aria-label") || el.getAttribute("placeholder") || el.value || el.tagName).toString().slice(0, 40);
+  return { ok: true, x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2), tag: el.tagName, text: got, match: !text || text === got || got.includes(text) || text.includes(got) };
 }
 function typeIntoFn(selector, text) {
   const e = document.querySelector(selector);
   if (!e) return "element not found: " + selector;
   e.focus();
-  if (e.tagName === "INPUT" || e.tagName === "TEXTAREA") { e.value = text; e.dispatchEvent(new Event("input", { bubbles: true })); e.dispatchEvent(new Event("change", { bubbles: true })); }
+  if (e.tagName === "INPUT" || e.tagName === "TEXTAREA") {
+    // Use the native value setter so React/Angular/Vue-controlled inputs see the change
+    // (assigning e.value directly bypasses their change tracking on controlled inputs).
+    const proto = e.tagName === "INPUT" ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype;
+    const setter = Object.getOwnPropertyDescriptor(proto, "value") && Object.getOwnPropertyDescriptor(proto, "value").set;
+    if (setter) setter.call(e, text); else e.value = text;
+    e.dispatchEvent(new Event("input", { bubbles: true }));
+    e.dispatchEvent(new Event("change", { bubbles: true }));
+  }
   else if (e.isContentEditable) { e.textContent = text; e.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: text })); }
   else { e.setAttribute("value", text); e.dispatchEvent(new Event("input", { bubbles: true })); }
   return "typed into " + selector;
@@ -683,43 +1260,74 @@ async function executeTool(name, args, tabId) {
   const tid = args.tabId != null ? args.tabId : tabId;
   switch (name) {
     case "read_page": {
+      let result;
       try {
         const [r] = await chrome.scripting.executeScript({ target: { tabId: tid }, func: extractPageFn });
-        return { content: JSON.stringify(r.result) };
+        result = r.result;
       } catch (e) {
         // Chrome blocks extension scripting on some pages (the Web Store gallery, chrome:// pages).
         // Fall back to CDP Runtime.evaluate via the debugger — it runs in the page's main world and
         // bypasses the extension-scripting policy. (Attaches the debugger → banner appears.)
         const msg = String((e && e.message) || e);
-        try {
-          const val = await cdpEval(tid, "(" + extractPageFn.toString() + ")()");
-          return { content: JSON.stringify(val) };
-        } catch (e2) {
-          return { content: "read_page blocked on this page (extension scripting disabled and CDP fallback failed): " + msg + " | " + String((e2 && e2.message) || e2), isError: true };
-        }
+        try { result = await cdpEval(tid, "(" + extractPageFn.toString() + ")()"); }
+        catch (e2) { return { content: "read_page blocked on this page (extension scripting disabled and CDP fallback failed): " + msg + " | " + String((e2 && e2.message) || e2), isError: true }; }
       }
+      if (!result) return { content: "read_page returned no result", isError: true };
+      // DOM-diff: if the page (same URL) is byte-for-byte unchanged since the last read of this tab,
+      // drop the large `text` field and flag unchanged. The element list is still returned in full so
+      // click-by-n indices stay valid; only the redundant page text is omitted to save context tokens.
+      const sig = pageSig(result);
+      const cached = pageCache.get(tid);
+      if (cached && cached.url === result.url && cached.sig === sig) {
+        return { content: JSON.stringify({ url: result.url, title: result.title, viewport: result.viewport, unchanged: true, text: "(page unchanged since last read — element list below is identical to the previous read_page; reuse it)", elements: result.elements }) };
+      }
+      pageCache.set(tid, { url: result.url, sig, text: result.text, elements: result.elements });
+      return { content: JSON.stringify(result) };
     }
     case "click": {
       const b = args.button || "left";
-      await sendToActor(tid, { __nocdp: true, kind: "mouse", type: "mousePressed", x: args.x, y: args.y, button: b, clickCount: 1, buttons: b === "right" ? 2 : b === "middle" ? 4 : 1 });
-      await sendToActor(tid, { __nocdp: true, kind: "mouse", type: "mouseReleased", x: args.x, y: args.y, button: b, clickCount: 1, buttons: 0 });
-      return { content: `clicked ${args.x},${args.y} (${b})` };
+      let x = args.x, y = args.y, label = `(${x},${y})`;
+      if (args.n != null || args.selector) {
+        let resolved;
+        try {
+          const [r] = await chrome.scripting.executeScript({ target: { tabId: tid }, func: resolveClickFn, args: [args.n ?? null, args.selector ?? null, args.text ?? null] });
+          resolved = r.result;
+        } catch (e) {
+          try { resolved = await cdpEval(tid, "(" + resolveClickFn.toString() + ")(" + JSON.stringify(args.n ?? null) + "," + JSON.stringify(args.selector ?? null) + "," + JSON.stringify(args.text ?? null) + ")"); }
+          catch (e2) { return { content: "click: resolve failed (page may block scripting): " + String((e2 && e2.message) || e), isError: true }; }
+        }
+        if (!resolved || !resolved.ok) return { content: "click: " + (resolved && resolved.error || "element not found") + " — call read_page to refresh the element list", isError: true };
+        x = resolved.x; y = resolved.y;
+        label = (args.n != null ? "#" + args.n + " " : "") + (args.selector || "") + ' "' + resolved.text + '" → (' + x + "," + y + ")" + (resolved.match === false ? " [text mismatch — verify]" : "");
+      }
+      if (x == null || y == null) return { content: "click: provide n, selector, or x,y", isError: true };
+      await sendToActor(tid, { __nocdp: true, kind: "mouse", type: "mousePressed", x, y, button: b, clickCount: 1, buttons: b === "right" ? 2 : b === "middle" ? 4 : 1 });
+      await sendToActor(tid, { __nocdp: true, kind: "mouse", type: "mouseReleased", x, y, button: b, clickCount: 1, buttons: 0 });
+      return { content: `clicked ${label} (${b})` };
     }
-    case "type": { const [r] = await chrome.scripting.executeScript({ target: { tabId: tid }, func: typeIntoFn, args: [args.selector, args.text] }); return { content: r.result || "typed" }; }
+    case "type": { const [r] = await chrome.scripting.executeScript({ target: { tabId: tid }, func: typeIntoFn, args: [args.selector, args.text] }); try { await sendToActor(tid, { __nocdp: true, kind: "phantom", at: "type", text: args.text }); } catch (_) {} return { content: r.result || "typed" }; }
     case "press_key": {
       const k = parseKeyCombo(args.key);
-      await sendToActor(tid, { __nocdp: true, kind: "key", type: "keyDown", key: k.key, modifiers: k.modifiers });
-      await sendToActor(tid, { __nocdp: true, kind: "key", type: "keyUp", key: k.key, modifiers: k.modifiers });
+      const def = (CDP_KEYS && CDP_KEYS[k.key.toLowerCase()]) || {};
+      const down = { __nocdp: true, kind: "key", type: "keyDown", key: k.key, code: def.code || "", modifiers: k.modifiers, windowsVirtualKeyCode: def.keyCode || 0 };
+      await sendToActor(tid, down);
+      // keyup may be lost if keydown submitted a form and the page navigated — that's fine.
+      try { await sendToActor(tid, { ...down, type: "keyUp" }); } catch (_) {}
       return { content: "pressed " + args.key };
     }
-    case "scroll": { await sendToActor(tid, { __nocdp: true, kind: "mouse", type: "mouseWheel", x: 200, y: 200, deltaX: args.dx || 0, deltaY: args.dy || 0 }); return { content: "scrolled" }; }
-    case "navigate": { await chrome.tabs.update(tid, { url: args.url }); return { content: "navigating to " + args.url }; }
+    case "scroll": {
+      let sx = args.x, sy = args.y;
+      if (sx == null || sy == null) { try { const [r] = await chrome.scripting.executeScript({ target: { tabId: tid }, func: () => ({ x: Math.round(innerWidth / 2), y: Math.round(innerHeight / 2) }) }); sx = r.result.x; sy = r.result.y; } catch (_) { sx = 200; sy = 200; } }
+      await sendToActor(tid, { __nocdp: true, kind: "mouse", type: "mouseWheel", x: sx, y: sy, deltaX: args.dx || 0, deltaY: args.dy || 0 });
+      return { content: `scrolled dx=${args.dx || 0} dy=${args.dy || 0} at (${sx},${sy})` };
+    }
+    case "navigate": { pageCache.delete(tid); await chrome.tabs.update(tid, { url: args.url }); return { content: "navigating to " + args.url }; }
     case "get_text": { const [r] = await chrome.scripting.executeScript({ target: { tabId: tid }, func: (s) => { const e = document.querySelector(s); return e ? e.innerText : null; }, args: [args.selector] }); return { content: r.result == null ? "element not found" : r.result }; }
     case "eval": { const [r] = await chrome.scripting.executeScript({ target: { tabId: tid }, world: "MAIN", func: (c) => { try { return eval(c); } catch (e) { return String(e); } }, args: [args.code] }); return { content: JSON.stringify(r.result) }; }
     case "list_tabs": { const tabs = await chrome.tabs.query({}); return { content: JSON.stringify(tabs.map(t => ({ id: t.id, title: t.title, url: t.url, active: t.active, windowId: t.windowId })).slice(0, 50)) }; }
     case "new_tab": { const t = await chrome.tabs.create({ url: args.url, active: args.active !== false }); return { content: "opened tab " + t.id + " -> " + args.url }; }
     case "switch_tab": { await chrome.tabs.update(args.tabId, { active: true }); try { const t = await chrome.tabs.get(args.tabId); if (t.windowId) await chrome.windows.update(t.windowId, { focused: true }); } catch {} return { content: "switched to tab " + args.tabId }; }
-    case "close_tab": { await chrome.tabs.remove(args.tabId); return { content: "closed tab " + args.tabId }; }
+    case "close_tab": { pageCache.delete(args.tabId); await chrome.tabs.remove(args.tabId); return { content: "closed tab " + args.tabId }; }
     case "attached_file": { if (!chat.attachment) return { content: "no file attached", isError: true }; const a = chat.attachment; return { content: JSON.stringify({ name: a.name, type: a.type, size: a.size, text: a.text || null }) }; }
     case "upload_file": {
       if (!chat.attachment) return { content: "no file attached", isError: true };
@@ -730,8 +1338,15 @@ async function executeTool(name, args, tabId) {
     case "real_move": { await cdpMouseMove(tid, args.x, args.y); return { content: `real-moved to ${args.x},${args.y}` }; }
     case "real_click": {
       const btn = args.button || "left";
-      await cdpMouseClick(tid, args.x, args.y, btn);
-      return { content: `real-clicked ${args.x},${args.y} (${btn})` };
+      let x = args.x, y = args.y;
+      if (args.n != null || args.selector) {
+        try { const [r] = await chrome.scripting.executeScript({ target: { tabId: tid }, func: resolveClickFn, args: [args.n ?? null, args.selector ?? null, args.text ?? null] }); if (r.result && r.result.ok) { x = r.result.x; y = r.result.y; } }
+        catch (e) { /* fall back to provided x,y */ }
+      }
+      if (x == null || y == null) return { content: "real_click: provide n, selector, or x,y", isError: true };
+      try { await sendToActor(tid, { __nocdp: true, kind: "phantom", at: "click", x, y, button: btn }); } catch (_) {}
+      await cdpMouseClick(tid, x, y, btn);
+      return { content: `real-clicked (${x},${y}) (${btn})` };
     }
     case "real_type": {
       // Focus the field first (by selector DOM.focus, or by coordinate click), then trusted
@@ -796,20 +1411,35 @@ function parseKeyCombo(s) {
 // synthetic (isTrusted:false) no-CDP events. Tradeoff: Chrome shows a "debugging"
 // banner on the tab while attached (expected, harmless).
 const attachedTabs = new Set();
+// Reflect real_* (CDP debugger) state in the top-bar trusted-mode badge without a full re-render.
+function updateTrustedIndicator() {
+  const b = root.querySelector(".trusted-badge");
+  if (!b) return;
+  const on = attachedTabs.size > 0;
+  b.classList.toggle("on", on);
+  b.title = on
+    ? "Trusted control ACTIVE — Chrome debugger attached (real_* mode). Chrome shows a 'debugging' banner on those tabs. Click for details."
+    : "Stealth mode — real DOM events, no debugger, no banner. Lights up if the agent escalates to trusted (real_*) input.";
+}
 try {
-  chrome.debugger.onDetach.addListener((src) => { if (src && src.tabId != null) attachedTabs.delete(src.tabId); });
-  chrome.tabs.onRemoved.addListener((id) => { attachedTabs.delete(id); try { chrome.debugger.detach({ tabId: id }, () => {}); } catch {} });
+  chrome.debugger.onDetach.addListener((src) => { if (src && src.tabId != null) attachedTabs.delete(src.tabId); updateTrustedIndicator(); });
+  chrome.tabs.onRemoved.addListener((id) => {
+    // Only detach if WE had a debugger on that tab; reading lastError in the callback
+    // keeps Chrome from logging "Unchecked runtime.lastError: No tab with given id".
+    if (attachedTabs.delete(id)) { try { chrome.debugger.detach({ tabId: id }, () => { void chrome.runtime.lastError; }); } catch {} }
+    updateTrustedIndicator();
+  });
 } catch {}
 async function ensureAttached(tabId) {
   if (attachedTabs.has(tabId)) return;
-  try { await chrome.debugger.attach({ tabId }, "1.3"); attachedTabs.add(tabId); }
+  try { await chrome.debugger.attach({ tabId }, "1.3"); attachedTabs.add(tabId); updateTrustedIndicator(); }
   catch (e) {
     const msg = String((e && e.message) || e);
     if (!/already|another debugger/i.test(msg)) throw new Error("debugger attach failed: " + msg);
     // "already attached" — either by us (sendCommand works) or by another debugger (it won't).
     // Tentatively mark; cdpSend clears the flag again if sendCommand then fails, so the next
     // call retries (recoverable once the other debugger detaches).
-    attachedTabs.add(tabId);
+    attachedTabs.add(tabId); updateTrustedIndicator();
   }
 }
 async function cdpSend(tabId, method, params) {
@@ -818,7 +1448,7 @@ async function cdpSend(tabId, method, params) {
   catch (e) {
     // We're not actually attached (another debugger holds the tab, or it auto-detached on
     // navigation). Drop the flag so the next call re-attaches instead of failing forever.
-    attachedTabs.delete(tabId);
+    attachedTabs.delete(tabId); updateTrustedIndicator();
     throw e;
   }
 }
@@ -936,6 +1566,44 @@ root.addEventListener("click", async (e) => {
   const { act, id, tab, idx, theme: th } = t.dataset;
   switch (act) {
     case "logo": view = (view === "providers") ? "chat" : "providers"; render(); break;
+    case "tasks-view": view = (view === "tasks") ? "chat" : "tasks"; taskEditing = null; render(); break;
+    case "task-add": taskEditing = { id: "t_" + Math.random().toString(36).slice(2, 10), name: "", prompt: "", url: "", kind: "interval", every: 30, at: "09:00", enabled: true }; render(); break;
+    case "task-edit": { const t2 = tasks.list.find(x => x.id === id); if (t2) { taskEditing = { ...t2 }; render(); } break; }
+    case "task-kind": { if (taskEditing) { taskEditing.kind = t.dataset.kind; render(); } break; }
+    case "task-close": case "task-cancel": taskEditing = null; render(); break;
+    case "task-save": {
+      if (!taskEditing) break;
+      if (!taskEditing.prompt.trim()) { alert("Give the task a prompt — that's what the agent will do."); break; }
+      if (!taskEditing.name.trim()) taskEditing.name = trunc(taskEditing.prompt.trim(), 36);
+      const i2 = tasks.list.findIndex(x => x.id === taskEditing.id);
+      if (i2 >= 0) tasks.list[i2] = taskEditing; else tasks.list.push(taskEditing);
+      await saveTasks();
+      await scheduleTaskAlarm(taskEditing);
+      taskEditing = null; render();
+      break;
+    }
+    case "task-del": {
+      if (!confirm("Delete this scheduled task?")) break;
+      try { await chrome.alarms.clear("nocdp_task_" + id); } catch {}
+      tasks.list = tasks.list.filter(x => x.id !== id);
+      await saveTasks(); render();
+      break;
+    }
+    case "task-toggle": {
+      const t2 = tasks.list.find(x => x.id === id); if (!t2) break;
+      t2.enabled = !t2.enabled;
+      await saveTasks();
+      await scheduleTaskAlarm(t2);
+      render();
+      break;
+    }
+    case "task-run": {
+      try {
+        const r = await chrome.runtime.sendMessage({ type: "NOCDP_RUN_TASK", id });
+        if (!r || !r.ok) alert("Could not launch the task runner: " + (r && r.error || "no response from service worker — reload the extension"));
+      } catch (e2) { alert("Could not launch the task runner: " + e2.message); }
+      break;
+    }
     case "think": {
       // Figma spec: thinking on/off liquid switch (replaces the effort dropdown).
       if (chat.effort === "off") chat.effort = chat.lastEffort || "medium";
@@ -948,7 +1616,7 @@ root.addEventListener("click", async (e) => {
     }
     case "theme": await setTheme(th); break;
     case "add": editing = { id: uid(), name: "", style: "openai", baseUrl: "", apiKey: "", models: [] }; render(); break;
-    case "edit": editing = JSON.parse(JSON.stringify(state.providers.find(p => p.id === id))); render(); break;
+    case "edit": { const orig = state.providers.find(p => p.id === id); editing = JSON.parse(JSON.stringify(orig)); editing.apiKey = await decryptedApiKey(orig); render(); break; }
     case "del": if (confirm("Delete provider '" + (state.providers.find(p => p.id === id)?.name || "") + "'?")) { state.providers = state.providers.filter(p => p.id !== id); if (state.activeProviderId === id) { state.activeProviderId = null; state.activeModelId = null; } await persist(); render(); } break;
     case "tab": if (editing && editing.style !== tab) {
       editing.style = tab;
@@ -962,9 +1630,25 @@ root.addEventListener("click", async (e) => {
     } break;
     case "test": await doTest(); break;
     case "fetch": await doFetch(); break;
-    case "manual": if (editing) { editing.models.push({ id: "", displayName: "", vision: false }); render(); } break;
+    case "manual": if (editing) { editing.models.push({ id: "", displayName: "", vision: false, ctxWindow: "" }); render(); } break;
     case "save": await doSave(); break;
     case "close": case "cancel": editing = null; render(); break;
+    case "reveal-key": { const inp = root.querySelector('[data-f="apiKey"]'); if (inp) inp.type = inp.type === "password" ? "text" : "password"; break; }
+    case "sec": secOpen = !secOpen; render(); break;
+    case "sec-close": secOpen = false; render(); break;
+    case "sec-enable": case "sec-change": { await enableOrChangeVault(); break; }
+    case "sec-disable": { await disableVault(); break; }
+    case "unlock": { await tryUnlock(); break; }
+    case "reset-vault": {
+      if (!confirm("Reset the key vault? Your encrypted API keys will be cleared and you'll need to re-enter them.")) break;
+      for (const p of state.providers) p.apiKey = "";
+      vault = { enabled: false, salt: null, canary: null };
+      try { await chrome.storage.session.remove(SESSION_KEY); } catch {}
+      vaultKey = null; locked = false;
+      await persist(); await persistVault(); render();
+      break;
+    }
+    case "trusted": { alert(attachedTabs.size ? ("Trusted control ACTIVE on " + attachedTabs.size + " tab(s). The agent escalated to real_* (Chrome debugger / CDP) input — Chrome shows a 'debugging' banner on those tabs. This is expected while real_* is in use and clears when the tab closes.") : "Trusted (real_*) mode is off. The agent is driving pages with no-CDP stealth — real DOM events, no debugger, no banner."); break; }
     case "rm-model": if (editing) { editing.models.splice(+idx, 1); render(); } break;
     case "send": await sendPrompt(); break;
     case "stop": await stopChat(); break;
@@ -975,8 +1659,24 @@ root.addEventListener("click", async (e) => {
     case "quick-prompt": { const ta = root.querySelector('[data-chat="input"]'); if (ta) { ta.value = t.dataset.prompt; await sendPrompt(); } break; }
     case "load-conv": loadConv(id); break;
     case "del-conv": if (confirm("Delete this conversation?")) deleteConv(id); break;
-    case "copy": { const m = t.closest(".msg"); const txt = m?.querySelector(".content, .bubble")?.innerText || ""; try { await navigator.clipboard.writeText(txt); const o = t.textContent; t.textContent = "Copied"; setTimeout(() => { t.textContent = o; }, 900); } catch {} break; }
+    case "copy": { const m = t.closest(".msg"); const src = m?.querySelector(".content, .bubble"); if (src) { const c = src.cloneNode(true); c.querySelectorAll(".toolcard").forEach(el => el.remove()); const txt = c.innerText; try { await navigator.clipboard.writeText(txt); const o = t.textContent; t.textContent = "Copied"; setTimeout(() => { t.textContent = o; }, 900); } catch {} } break; }
     case "copy-code": { const pre = t.closest(".code"); const txt = pre?.querySelector("code")?.innerText || ""; try { await navigator.clipboard.writeText(txt); t.textContent = "Copied"; setTimeout(() => { t.textContent = "Copy"; }, 900); } catch {} break; }
+    case "tc-toggle": {
+      const card = t.closest(".toolcard"); if (!card) break;
+      const tc = findToolCard(t.dataset.tc || "");
+      if (tc) tc.open = !tc.open;
+      if (tc) card.outerHTML = renderToolCard(tc);
+      break;
+    }
+    case "shot-zoom": {
+      const src = t.getAttribute("src"); if (!src) break;
+      const lb = document.createElement("div");
+      lb.className = "shot-lightbox";
+      lb.innerHTML = `<img src="${src}" alt="screenshot">`;
+      lb.onclick = () => lb.remove();
+      document.body.appendChild(lb);
+      break;
+    }
   }
 });
 root.addEventListener("input", (e) => {
@@ -987,9 +1687,10 @@ root.addEventListener("input", (e) => {
     t.style.height = "auto"; t.style.height = Math.min(t.scrollHeight, 160) + "px";
     return;
   }
+  if (t.dataset.tf !== undefined) { if (taskEditing) { const f = t.dataset.tf; taskEditing[f] = f === "every" ? (parseInt(t.value, 10) || "") : t.value; } return; }
   if (!editing) return;
   if (t.dataset.f) editing[t.dataset.f] = t.value;
-  if (t.dataset.mi !== undefined && t.dataset.idx !== undefined) { const m = editing.models[+t.dataset.idx]; if (m) m[t.dataset.mi] = t.type === "checkbox" ? t.checked : t.value; }
+  if (t.dataset.mi !== undefined && t.dataset.idx !== undefined) { const m = editing.models[+t.dataset.idx]; if (m) { const mi = t.dataset.mi; m[mi] = mi === "ctxWindow" ? (t.value === "" ? "" : (parseInt(t.value, 10) || "")) : (t.type === "checkbox" ? t.checked : t.value); } }
 });
 root.addEventListener("change", (e) => {
   const t = e.target;
@@ -1020,8 +1721,62 @@ root.addEventListener("keydown", (e) => {
   document.body.insertBefore(orbs, document.body.firstChild);
 })();
 
-load().then(render);
+// Runner mode: nocdp-scheduler.js opened us as a popup with ?task=<id>&tabId=<n> —
+// run that task's prompt autonomously against the tab, then notify + close.
+const __taskParam = new URLSearchParams(location.search).get("task");
+load().then(async () => {
+  render();
+  if (__taskParam) await startScheduledRun(__taskParam);
+});
 initNetworkLogging();
+
+async function startScheduledRun(taskId) {
+  const t = tasks.list.find(x => x.id === taskId);
+  const fail = async (msg) => {
+    try { chrome.notifications.create({ type: "basic", iconUrl: "/icon-128.png", title: "Scheduled task could not run", message: msg }); } catch {}
+    if (t) { t.lastRun = Date.now(); t.lastStatus = "error"; await saveTasks(); }
+    setTimeout(closeRunnerWindow, 1500);
+  };
+  if (!t) return fail("Task not found (id " + taskId + ").");
+  if (locked) return fail('"' + t.name + '": API keys are locked by your passphrase vault. Open the side panel and unlock once per browser session.');
+  if (!activePair()) return fail('"' + t.name + '": no active model configured in Providers.');
+  scheduledRun = t; schedError = false;
+  confirmGate = false;                       // autonomous run — nobody is present to answer confirm() popups
+  // wait for the work tab (opened by the scheduler just before us) to finish loading
+  const tid = await getTabId();
+  scheduledRun.workTabId = tid;
+  if (tid != null) {
+    for (let i = 0; i < 30; i++) {
+      try { const tab = await chrome.tabs.get(tid); if (tab.status === "complete") break; } catch { break; }
+      await new Promise(r => setTimeout(r, 500));
+    }
+    await new Promise(r => setTimeout(r, 800));   // small settle for JS-heavy pages
+  }
+  newChat();
+  const ta = root.querySelector('[data-chat="input"]');
+  if (!ta) return fail("Runner UI failed to boot.");
+  ta.value = "[Scheduled task: " + t.name + "]\n" + t.prompt;
+  await sendPrompt();
+}
+async function closeRunnerWindow() {
+  try { const w = await chrome.windows.getCurrent(); if (w && w.id != null) { await chrome.windows.remove(w.id); return; } } catch {}
+  try { window.close(); } catch {}
+}
+async function finalizeScheduledRun() {
+  const name = scheduledRun.name, workTabId = scheduledRun.workTabId, runId = scheduledRun.id;
+  scheduledRun = null;
+  const t = tasks.list.find(x => x.id === runId);
+  if (t) { t.lastRun = Date.now(); t.lastStatus = schedError ? "error" : "ok"; await saveTasks(); }
+  const lastA = [...chat.messages].reverse().find(m => m.role === "assistant");
+  const bodyText = trunc(String(lastA && lastA.content || "").replace(/\[\[tool:[^\]]+\]\]/g, "").replace(/\s+/g, " ").trim(), 120);
+  try {
+    chrome.notifications.create({ type: "basic", iconUrl: "/icon-128.png", title: (schedError ? "⚠ " : "✓ ") + name, message: bodyText || (schedError ? "Run hit an error — transcript in History." : "Done — transcript saved to History."), priority: schedError ? 2 : 0 });
+  } catch {}
+  // On success close the work window too (it fires every N min — don't pile up windows);
+  // on error leave the page open so the user can see what went wrong.
+  if (!schedError && workTabId != null) { try { const tab = await chrome.tabs.get(workTabId); if (tab && tab.windowId != null) await chrome.windows.remove(tab.windowId); } catch {} }
+  setTimeout(closeRunnerWindow, 1200);
+}
 
 // external MCP control channel: lets MCP clients (e.g. Claude Code) drive this browser
 const mcpES = new EventSource(`${BRAIN}/api/mcp_control`);
