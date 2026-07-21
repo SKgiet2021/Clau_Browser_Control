@@ -375,6 +375,38 @@ hr { border: none; border-top: 1px solid rgba(255,255,255,.22); margin: 4px 0; }
   box-shadow: inset 1px 1px 1px -0.5px rgba(255,255,255,.5);
 }
 
+/* ============================================================
+   SETTINGS — labeled sections + tappable nav rows
+   ============================================================ */
+.scroll.settings { gap: 20px; }
+.settings-section { display: flex; flex-direction: column; gap: 10px; }
+.section-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 4px; min-height: 26px; }
+.section-label {
+  font-size: 11px; font-weight: 700; letter-spacing: .09em; text-transform: uppercase;
+  color: var(--muted);
+}
+.section-act { display: flex; align-items: center; gap: 6px; }
+
+.nav-row {
+  flex-direction: row; align-items: center; gap: 12px; padding: 12px 14px;
+  cursor: pointer; transition: transform .4s var(--spring), filter .15s;
+}
+.nav-row.pressable:hover { filter: brightness(1.08); }
+.nav-row.pressable:active { transform: scale(.98); }
+.nav-ico {
+  width: 34px; height: 34px; border-radius: 11px; flex: none;
+  display: grid; place-items: center; color: var(--text);
+  background: var(--track);
+  box-shadow: inset 0 1px 2px rgba(0,0,0,.2), inset 0 0 0 .5px var(--track-line);
+}
+.nav-ico svg { width: 18px; height: 18px; }
+.nav-txt { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.nav-txt strong { font-size: 13.5px; font-weight: 600; }
+.nav-txt span { font-size: 11.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nav-chev { flex: none; color: var(--faint); display: grid; place-items: center; }
+.nav-chev svg { width: 16px; height: 16px; }
+
+
 .conv-row { cursor: pointer; transition: transform .4s var(--spring); animation: rise .45s var(--spring) both; }
 .conv-row:active { transform: scale(.97); }
 

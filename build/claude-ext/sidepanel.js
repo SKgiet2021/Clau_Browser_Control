@@ -446,7 +446,7 @@ function renderNav() {
   const el = document.createElement("div");
   el.className = "topbar";
   const mid = view === "providers"
-    ? `<div class="providers-pill glass"><span>Providers</span></div>`
+    ? `<div class="providers-pill glass"><span>Settings</span></div>`
     : view === "tasks"
     ? `<div class="providers-pill glass"><span>Scheduled Tasks</span></div>`
     : view === "procs"
@@ -457,7 +457,7 @@ function renderNav() {
         <button class="opt" data-nav="history">History</button>
       </div>`;
   el.innerHTML = `
-    <button class="logo-blob glass pressable" data-act="logo" title="${view === "providers" ? "Back to chat" : "Provider settings"}">${ICON("claude", 28)}</button>
+    <button class="logo-blob glass pressable" data-act="logo" title="${view === "providers" ? "Back to chat" : "Settings"}">${ICON("claude", 28)}</button>
     ${mid}
     <button class="icon-btn pressable" data-act="new-chat" title="New chat">${ICON("add-green", 34)}</button>`;
   return el;
@@ -466,28 +466,72 @@ function renderNav() {
 // ---------- Providers view ----------
 function renderProvidersView() {
   const wrap = document.createElement("div");
-  wrap.className = "scroll";
-  const head = document.createElement("div");
-  head.className = "between";
-  head.innerHTML = `
-    <div class="sec-pill glass"><span>Providers</span></div>
-    <div class="row">
-      <button class="icon-btn glass pressable" data-act="add" title="Add provider">${ICON("plus", 18)}</button>
-      <div class="theme-switch">
-        <button data-act="theme" data-theme="light" class="${theme === "light" ? "active" : ""}">☀</button>
-        <button data-act="theme" data-theme="dark" class="${theme === "dark" ? "active" : ""}">☾</button>
-        <button data-act="theme" data-theme="system" class="${theme === "system" ? "active" : ""}">Auto</button>
-      </div>
-      <button class="icon-btn glass pressable ${vault.enabled ? "on" : ""}" data-act="sec" title="Key encryption: ${vault.enabled ? "ON — click to manage" : "off — click to enable"}">${TC_ICON('<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/><circle cx="12" cy="15.5" r=".8"/>')}</button>
-      <button class="icon-btn glass pressable" data-act="tasks-view" title="Scheduled tasks">${TC_ICON('<circle cx="12" cy="13" r="7.5"/><path d="M12 9.5V13l2.5 2"/><path d="M5.2 3.2 3 5.4M18.8 3.2 21 5.4"/>')}</button>
-      <button class="icon-btn glass pressable" data-act="procs-view" title="Procedures (record & replay automations)">${TC_ICON('<path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v5h-5"/>')}</button>
+  wrap.className = "scroll settings";
+
+  // ---- Section: Providers ----
+  const provSec = section("Providers", `<button class="btn small good row" data-act="add" style="gap:5px" title="Add provider">${ICON("plus", 13)} Add</button>`);
+  provSec.appendChild(renderActiveBar());
+  provSec.appendChild(renderProviderList());
+  if (editing) provSec.appendChild(renderEditor());
+  wrap.appendChild(provSec);
+
+  // ---- Section: Automation ----
+  const autoSec = section("Automation");
+  autoSec.appendChild(navRow({
+    act: "tasks-view",
+    icon: TC_ICON('<circle cx="12" cy="13" r="7.5"/><path d="M12 9.5V13l2.5 2"/><path d="M5.2 3.2 3 5.4M18.8 3.2 21 5.4"/>'),
+    title: "Scheduled tasks",
+    sub: tasks.list.length ? `${tasks.list.length} task${tasks.list.length === 1 ? "" : "s"}` : "Run a prompt on a timer",
+  }));
+  autoSec.appendChild(navRow({
+    act: "procs-view",
+    icon: TC_ICON('<path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v5h-5"/>'),
+    title: "Procedures",
+    sub: procs.list.length ? `${procs.list.length} automation${procs.list.length === 1 ? "" : "s"}` : "Record & replay a flow",
+  }));
+  wrap.appendChild(autoSec);
+
+  // ---- Section: Appearance ----
+  const appSec = section("Appearance");
+  const themeCard = document.createElement("div");
+  themeCard.className = "card glass nav-row";
+  themeCard.innerHTML = `
+    <div class="nav-txt"><strong>Theme</strong><span>Light, dark, or follow the system</span></div>
+    <div class="theme-switch">
+      <button data-act="theme" data-theme="light" class="${theme === "light" ? "active" : ""}">☀</button>
+      <button data-act="theme" data-theme="dark" class="${theme === "dark" ? "active" : ""}">☾</button>
+      <button data-act="theme" data-theme="system" class="${theme === "system" ? "active" : ""}">Auto</button>
     </div>`;
-  wrap.appendChild(head);
-  wrap.appendChild(renderActiveBar());
-  wrap.appendChild(renderProviderList());
-  if (secOpen) wrap.appendChild(renderSecurity());
-  if (editing) wrap.appendChild(renderEditor());
+  appSec.appendChild(themeCard);
+  wrap.appendChild(appSec);
+
+  // ---- Section: Security ----
+  const secSec = section("Security");
+  for (const node of Array.from(renderSecurity().childNodes)) secSec.appendChild(node);
+  wrap.appendChild(secSec);
+
   return wrap;
+}
+// A labeled settings section: uppercase label (with optional right-aligned action) + body column.
+function section(label, action) {
+  const sec = document.createElement("div");
+  sec.className = "settings-section";
+  const head = document.createElement("div");
+  head.className = "section-head";
+  head.innerHTML = `<span class="section-label">${label}</span>${action ? `<div class="section-act">${action}</div>` : ""}`;
+  sec.appendChild(head);
+  return sec;
+}
+// A tappable settings row: rounded icon tile + title/subtitle + chevron.
+function navRow({ act, icon, title, sub }) {
+  const row = document.createElement("div");
+  row.className = "card glass nav-row pressable";
+  row.dataset.act = act;
+  row.innerHTML = `
+    <div class="nav-ico">${icon}</div>
+    <div class="nav-txt"><strong>${title}</strong><span>${sub}</span></div>
+    <div class="nav-chev">${TC_ICON('<path d="M9 6l6 6-6 6"/>')}</div>`;
+  return row;
 }
 function renderActiveBar() {
   const el = document.createElement("div");
@@ -556,7 +600,7 @@ function renderSecurity() {
   vaultCard.className = "card glass editor";
   if (vault.enabled) {
     vaultCard.innerHTML = `
-    <div class="between"><h1 style="font-size:14px">🔒 Key encryption <span class="badge good">ON</span></h1><button class="btn small warn" data-act="sec-close">✕</button></div>
+    <div class="between"><h1 style="font-size:14px">🔒 Key encryption <span class="badge good">ON</span></h1></div>
     <p class="muted" style="font-size:12px">API keys are encrypted at rest. You'll enter your passphrase once per browser restart to unlock.</p>
     <div class="field"><label>Current passphrase <span class="muted" style="font-weight:400">(required)</span></label><input data-sec="cur" type="password" placeholder="Current passphrase" autocomplete="current-password"></div>
     <div class="field"><label>New passphrase</label><input data-sec="pp" type="password" placeholder="New passphrase" autocomplete="new-password"></div>
@@ -566,6 +610,14 @@ function renderSecurity() {
       <button class="btn good" data-act="sec-change">Change passphrase</button>
       <button class="btn warn" data-act="sec-disable">Turn off</button>
     </div>`;
+  } else if (!secOpen) {
+    // Collapsed prompt — one tap to reveal the enable form.
+    vaultCard.className = "card glass nav-row pressable";
+    vaultCard.dataset.act = "sec";
+    vaultCard.innerHTML = `
+      <div class="nav-ico">${TC_ICON('<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/><circle cx="12" cy="15.5" r=".8"/>')}</div>
+      <div class="nav-txt"><strong>Key encryption</strong><span>Off — encrypt your API keys with a passphrase</span></div>
+      <div class="nav-chev">${TC_ICON('<path d="M9 6l6 6-6 6"/>')}</div>`;
   } else {
     vaultCard.innerHTML = `
     <div class="between"><h1 style="font-size:14px">🔒 Key encryption</h1><button class="btn small warn" data-act="sec-close">✕</button></div>
