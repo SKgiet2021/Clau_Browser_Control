@@ -63,6 +63,25 @@ async function scheduleTaskAlarm(t) {
     }
   } catch (e) { console.error("[tasks] alarm failed:", e); }
 }
+// Procedures: create/clear the proc's schedule alarm (mirror of scheduleTaskAlarm, using
+// proc.schedule = { kind, every, at, enabled }).
+async function scheduleProcAlarm(p) {
+  const name = "nocdp_proc_" + p.id;
+  if (!chrome.alarms) return;
+  try { await chrome.alarms.clear(name); } catch {}
+  if (!p.schedule || !p.schedule.enabled) return;
+  try {
+    if (p.schedule.kind === "daily") {
+      const [h, m] = String(p.schedule.at || "09:00").split(":").map(Number);
+      const next = new Date(); next.setHours(h || 0, m || 0, 0, 0);
+      if (next.getTime() <= Date.now()) next.setDate(next.getDate() + 1);
+      await chrome.alarms.create(name, { when: next.getTime(), periodInMinutes: 1440 });
+    } else {
+      const every = Math.max(1, +p.schedule.every || 30);
+      await chrome.alarms.create(name, { periodInMinutes: every, delayInMinutes: every });
+    }
+  } catch (e) { console.error("[procs] alarm failed:", e); }
+}
 
 // ---------- key vault (passphrase-based AES-GCM encryption at rest) ----------
 // Providers' apiKeys are encrypted in chrome.storage.local with a key derived (PBKDF2) from a
@@ -885,10 +904,131 @@ async function runProcedure(id) {
     alert("Macro replay failed: " + String((e && e.message) || e));
   }
 }
-async function runProcedureAI(proc) { /* Phase 5 */ }
+async function runProcedureAI(proc) {
+  if (!(proc.steps || []).length && !proc.goal) { alert("This procedure has no steps and no goal — nothing for the AI to do."); return; }
+  const pair = activePair();
+  if (!pair) { alert("No active provider/model — set one in Providers to run an AI procedure."); return; }
+  // decrypt sensitive steps so the agent has the plaintext to type
+  const trace = [];
+  for (let i = 0; i < (proc.steps || []).length; i++) {
+    const s = proc.steps[i];
+    let text = s.text;
+    if (s.sensitive) { try { text = await decryptStepText(s); } catch (e) { alert("AI replay can't start: " + e.message); return; } }
+    trace.push(formatStepForPrompt(i + 1, s, text));
+  }
+  // open the start URL in a new active tab (getTabId() will return it for the agent's tools)
+  let workTabId;
+  try {
+    if (proc.url) { const t = await chrome.tabs.create({ url: proc.url, active: true }); workTabId = t.id; await waitForTabComplete(workTabId); await sleep(800); }
+    else { workTabId = await getTabId(); if (workTabId == null) { alert("No active tab — set a Start URL in the procedure."); return; } }
+  } catch (e) { alert("Could not open the procedure's start URL: " + String((e && e.message) || e)); return; }
+  // run via the existing sendPrompt fold path (AgentCore) — composer + send
+  newChat();
+  const ta = root.querySelector('[data-chat="input"]');
+  if (!ta) { alert("Runner UI failed to boot."); return; }
+  ta.value = buildProcPrompt(proc, trace);
+  const prevGate = confirmGate;
+  confirmGate = false;   // autonomous replay
+  try { await sendPrompt(); }
+  finally { /* confirmGate restored by finishChat / finalize — leave it for the run */ }
+  proc.lastRun = Date.now(); proc.lastStatus = "ok"; await saveProcs();
+}
+function formatStepForPrompt(n, s, text) {
+  switch (s.type) {
+    case "navigate": return `${n}. navigate to ${s.url}`;
+    case "click": return `${n}. click "${s.text || ""}" (selector ${s.selector || "?"}${s.n != null && s.n >= 0 ? ", ordinal " + s.n : ""})`;
+    case "type": return `${n}. type "${text || ""}" into the field with selector ${s.selector || "?"}${s.sensitive ? "  [password]" : ""}`;
+    case "press": return `${n}. press ${s.key}`;
+    case "scroll": return `${n}. scroll (dx=${s.dx || 0}, dy=${s.dy || 0})`;
+    case "wait": return `${n}. wait ${s.ms || 500}ms`;
+    default: return `${n}. ${s.type}`;
+  }
+}
+function buildProcPrompt(proc, trace) {
+  return `You are replaying a recorded procedure: "${proc.name || "procedure"}".\nGoal: ${proc.goal || "(no goal specified — follow the recorded flow)"}\n\nRecorded flow (adapt to the current page — selectors/labels may differ; use read_page to verify before each action; skip steps already done):\n${trace.join("\n")}\n\nRules:\n- Follow the flow in order but adapt: if a step's selector no longer matches, use read_page to find the equivalent element by label/role.\n- For [password] steps, type the value exactly as given.\n- Stop when the goal is achieved. If a step is already satisfied (e.g. already logged in), skip ahead.\n- If you cannot complete a step after reasonable attempts, report it and stop rather than guessing wildly.\n\nBegin now.`;
+}
+// Phase 4: encrypt sensitive (password) step values on save. Returns an error string if
+// saving must be blocked (vault on but locked), else null. vault off → plaintext + a warning.
+async function encryptProcSteps(steps) {
+  let hasPlainPassword = false;
+  for (const s of steps) {
+    if (s.type === "type" && s.sensitive && s.text) {
+      if (vault.enabled) {
+        if (!vaultKey) return "The passphrase vault is ON but locked. Unlock it (Providers → 🔒) before saving a procedure that contains a password, so the password is stored encrypted.";
+        s.text = await vaultEncrypt(s.text, vaultKey);
+        s.encrypted = true;
+      } else {
+        s.encrypted = false; hasPlainPassword = true;
+      }
+    }
+  }
+  if (hasPlainPassword && !confirm("This procedure contains a password that will be stored UNENCRYPTED (the passphrase vault is off). Continue?")) return "Save cancelled — enable the vault to encrypt passwords.";
+  return null;
+}
+
+// ---------- recording orchestration ----------
+// The side panel is the stable orchestrator across navigations (the actor dies on each
+// navigation). It accumulates steps from the actor's __nocdp_record messages, appends
+// navigate steps on URL changes, and re-sends record-start to the fresh actor after each
+// navigation so recording continues across pages.
+function renderRecordSteps() {
+  if (!recordSession || !procEditing) return;
+  const ta = root.querySelector('[data-pf="stepsJson"]');
+  if (ta) ta.value = JSON.stringify(recordSession.steps, null, 2);
+}
+function onRecUpdated(tid, info) {
+  if (!recordSession || recordSession.tabId !== tid || !recordSession.active) return;
+  if (info.url && info.url !== recordSession.url) {
+    recordSession.url = info.url;
+    recordSession.steps.push({ type: "navigate", url: info.url });
+    renderRecordSteps();
+    sendToActor(tid, { __nocdp: true, kind: "record-start" }).catch(() => {});   // fresh actor on the new page
+  }
+}
+function onRecRemoved(tid) {
+  if (!recordSession || recordSession.tabId !== tid) return;
+  finalizeRecording(true);   // tab closed mid-record — keep what we have
+}
+async function startRecording() {
+  const tabId = await getTabId();
+  if (tabId == null) { alert("No active tab to record on — open a web page first."); return; }
+  if (procEditing && procEditing.url) {
+    try { await chrome.tabs.update(tabId, { url: procEditing.url }); await waitForTabComplete(tabId); await sleep(500); }
+    catch (e) { /* ignore — record on the current page */ }
+  }
+  try { await sendToActor(tabId, { __nocdp: true, kind: "record-start" }); }
+  catch (e) { alert("Could not start recording on this page: " + String((e && e.message) || e) + "\n\nchrome:// and the Web Store block extensions — try a normal web page."); return; }
+  let startUrl = "";
+  try { startUrl = (await chrome.tabs.get(tabId)).url; } catch {}
+  recordSession = { tabId, steps: [], url: startUrl, active: true };
+  if (procEditing && !procEditing.url) procEditing.url = startUrl;
+  try { chrome.tabs.onUpdated.addListener(onRecUpdated); } catch {}
+  try { chrome.tabs.onRemoved.addListener(onRecRemoved); } catch {}
+  render();
+}
+async function stopRecording() { await finalizeRecording(false); }
+async function finalizeRecording(tabClosed) {
+  if (!recordSession) return;
+  const sess = recordSession; recordSession = null;
+  sess.active = false;
+  try { chrome.tabs.onUpdated.removeListener(onRecUpdated); } catch {}
+  try { chrome.tabs.onRemoved.removeListener(onRecRemoved); } catch {}
+  try { await sendToActor(sess.tabId, { __nocdp: true, kind: "record-stop" }); } catch {}
+  if (procEditing) {
+    procEditing.steps = sess.steps;
+    const ta = root.querySelector('[data-pf="stepsJson"]');
+    if (ta) ta.value = JSON.stringify(sess.steps, null, 2);
+  }
+  if (tabClosed) alert("Recording tab closed — kept " + sess.steps.length + " step(s). You can Save or keep recording on another tab.");
+  render();
+}
 function describeProc(p) {
   const n = (p.steps || []).length;
-  return (p.mode === "ai" ? "AI" : "Macro") + " · " + n + " step" + (n === 1 ? "" : "s") + " · " + esc(trunc(p.url || "current page", 30));
+  let s = (p.mode === "ai" ? "AI" : "Macro") + " · " + n + " step" + (n === 1 ? "" : "s") + " · " + esc(trunc(p.url || "current page", 30));
+  if (p.schedule && p.schedule.enabled) {
+    s += " · " + (p.schedule.kind === "daily" ? "daily at " + (p.schedule.at || "09:00") : (Math.max(1,+p.schedule.every||30) >= 60 ? "every " + (Math.max(1,+p.schedule.every||30)/60) + "h" : "every " + Math.max(1,+p.schedule.every||30) + "m"));
+  }
+  return s;
 }
 function renderProcsView() {
   const wrap = document.createElement("div");
@@ -946,8 +1086,30 @@ function renderProcEditor() {
     <div class="muted" style="font-size:11px;margin-top:-4px">${p.mode === "ai" ? "AI: the agent follows your recording but adapts to the live page (costs tokens)." : "Macro: replays your exact steps with no AI (free, fast, exact — brittle if the page changes)."}</div>
     <div class="field"><label>Goal <span style="opacity:.55;font-weight:400">(what this procedure does — used by AI mode)</span></label><input data-pf="goal" placeholder="E.g; Log in and download the latest invoice PDF" value="${esc(p.goal || "")}"></div>
     <div class="field"><label>Start URL <span style="opacity:.55;font-weight:400">(page to open first)</span></label><input data-pf="url" placeholder="https://example.com" value="${esc(p.url || "")}"></div>
+    <div class="between" style="margin-top:2px"><strong style="font-size:12px">Schedule</strong></div>
+    <div class="ptype" data-sel="${p.schedule ? 1 : 0}">
+      <div class="lens glass"></div>
+      <button class="opt" data-act="proc-sched-toggle" data-sched="off">Manual</button>
+      <button class="opt" data-act="proc-sched-toggle" data-sched="on">Scheduled</button>
+    </div>
+    ${p.schedule ? `
+    <div class="ptype" data-sel="${p.schedule.kind === "daily" ? 1 : 0}" style="margin-top:6px">
+      <div class="lens glass"></div>
+      <button class="opt" data-act="proc-sched-kind" data-kind="interval">Every N min</button>
+      <button class="opt" data-act="proc-sched-kind" data-kind="daily">Daily at</button>
+    </div>
+    ${p.schedule.kind === "daily"
+      ? `<div class="field"><label>Time (24h)</label><input data-pf="schedAt" type="time" value="${esc(p.schedule.at || "09:00")}"></div>`
+      : `<div class="field"><label>Interval (minutes, min 1)</label><input data-pf="schedEvery" type="number" min="1" placeholder="30" value="${esc(String(p.schedule.every || 30))}"></div>`}` : ""}
     <div class="field"><label>Steps <span style="opacity:.55;font-weight:400">(JSON — record will fill this; you can hand-edit)</span></label><textarea data-pf="stepsJson" rows="5" style="font-family:monospace;font-size:11px" placeholder='[{"type":"navigate","url":"https://example.com"},{"type":"click","selector":"a.more","n":0}]'>${esc(stepsJson)}</textarea></div>
-    <div class="row" style="justify-content:center">
+    ${recordSession && recordSession.active
+      ? `<div class="muted" style="font-size:11px">Recording on the active tab — do the flow in the browser. Steps appear here live.</div>`
+      : `<div class="muted" style="font-size:11px">Tip: log in to the site first, then record only the task (2FA codes can't be replayed). Recording doesn't capture clicks inside iframes/shadow DOM.</div>`}
+    ${!vault.enabled ? `<div style="font-size:11px;color:#d4a84a;background:rgba(212,168,74,.12);border:1px solid rgba(212,168,74,.3);border-radius:8px;padding:6px 9px">⚠ The passphrase vault is OFF — any password you record will be stored unencrypted. Enable it in Providers → 🔒 to encrypt login passwords.</div>` : ""}
+    <div class="row" style="justify-content:center;gap:8px">
+      ${recordSession && recordSession.active
+        ? `<button class="btn warn row" data-act="proc-record-stop" style="gap:6px"><span style="width:8px;height:8px;border-radius:50%;background:#ff5a5a;display:inline-block"></span> Stop & Save</button>`
+        : `<button class="btn row" data-act="proc-record" style="gap:6px;background:rgba(180,40,40,.85);color:#fff"><span style="width:8px;height:8px;border-radius:50%;background:#ff5a5a;display:inline-block"></span> Record</button>`}
       <button class="btn good row" data-act="proc-save" style="gap:6px">${ICON("done", 15)} Save</button>
       <button class="btn warn row" data-act="proc-cancel" style="gap:6px">${ICON("close", 13)} Cancel</button>
     </div>`;
@@ -1252,6 +1414,7 @@ function finishChat() {
   persistConvs();
   render();
   if (scheduledRun) finalizeScheduledRun();   // runner mode: notify + close windows
+  else if (procRun) finalizeProcRun();          // scheduled procedure runner (AI mode)
 }
 async function stopChat() {
   if (window.AgentCore && chat.coreSession) { try { window.AgentCore.stop(chat.coreSession); } catch {} }
@@ -1878,6 +2041,8 @@ root.addEventListener("click", async (e) => {
     case "proc-add": procEditing = { id: "proc_" + Math.random().toString(36).slice(2, 10), name: "", mode: "macro", url: "", goal: "", steps: [], schedule: null, created: Date.now(), lastRun: null, lastStatus: null }; render(); break;
     case "proc-edit": { const p2 = procs.list.find(x => x.id === id); if (p2) { procEditing = JSON.parse(JSON.stringify(p2)); render(); } break; }
     case "proc-mode": { if (procEditing) { procEditing.mode = t.dataset.mode; render(); } break; }
+    case "proc-sched-toggle": { if (procEditing) { procEditing.schedule = (t.dataset.sched === "on") ? { kind: "interval", every: 30, at: "09:00", enabled: true } : null; render(); } break; }
+    case "proc-sched-kind": { if (procEditing && procEditing.schedule) { procEditing.schedule.kind = t.dataset.kind; render(); } break; }
     case "proc-close": case "proc-cancel": procEditing = null; render(); break;
     case "proc-save": {
       if (!procEditing) break;
@@ -1886,9 +2051,12 @@ root.addEventListener("click", async (e) => {
       try { procEditing.steps = JSON.parse((root.querySelector('[data-pf="stepsJson"]')?.value) || "[]") || []; }
       catch (e3) { alert("Steps JSON is invalid: " + e3.message); break; }
       if (!Array.isArray(procEditing.steps)) { alert("Steps must be a JSON array."); break; }
+      const encErr = await encryptProcSteps(procEditing.steps);
+      if (encErr) { alert(encErr); break; }
       const ip = procs.list.findIndex(x => x.id === procEditing.id);
       if (ip >= 0) procs.list[ip] = procEditing; else procs.list.push(procEditing);
       await saveProcs();
+      await scheduleProcAlarm(procEditing);
       procEditing = null; render();
       break;
     }
@@ -1903,6 +2071,8 @@ root.addEventListener("click", async (e) => {
       await runProcedure(id);   // Phase 2 (macro) / Phase 5 (AI)
       break;
     }
+    case "proc-record": { await startRecording(); break; }
+    case "proc-record-stop": { await stopRecording(); break; }
     case "think": {
       // Figma spec: thinking on/off liquid switch (replaces the effort dropdown).
       if (chat.effort === "off") chat.effort = chat.lastEffort || "medium";
@@ -1995,7 +2165,15 @@ root.addEventListener("input", (e) => {
     return;
   }
   if (t.dataset.tf !== undefined) { if (taskEditing) { const f = t.dataset.tf; taskEditing[f] = f === "every" ? (parseInt(t.value, 10) || "") : t.value; } return; }
-  if (t.dataset.pf !== undefined) { if (procEditing) { const f = t.dataset.pf; procEditing[f] = (f === "every") ? (parseInt(t.value, 10) || "") : t.value; } return; }
+  if (t.dataset.pf !== undefined) {
+    if (procEditing) {
+      const f = t.dataset.pf;
+      if (f === "schedEvery" && procEditing.schedule) procEditing.schedule.every = parseInt(t.value, 10) || "";
+      else if (f === "schedAt" && procEditing.schedule) procEditing.schedule.at = t.value;
+      else procEditing[f] = (f === "every") ? (parseInt(t.value, 10) || "") : t.value;
+    }
+    return;
+  }
   if (!editing) return;
   if (t.dataset.f) editing[t.dataset.f] = t.value;
   if (t.dataset.mi !== undefined && t.dataset.idx !== undefined) { const m = editing.models[+t.dataset.idx]; if (m) { const mi = t.dataset.mi; m[mi] = mi === "ctxWindow" ? (t.value === "" ? "" : (parseInt(t.value, 10) || "")) : (t.type === "checkbox" ? t.checked : t.value); } }
@@ -2031,9 +2209,11 @@ root.addEventListener("keydown", (e) => {
 // Runner mode: nocdp-scheduler.js opened us as a popup with ?task=<id>&tabId=<n> —
 // run that task's prompt autonomously against the tab, then notify + close.
 const __taskParam = new URLSearchParams(location.search).get("task");
+const __procParam = new URLSearchParams(location.search).get("proc");
 load().then(async () => {
   render();
   if (__taskParam) await startScheduledRun(__taskParam);
+  else if (__procParam) await startProcRun(__procParam);
 });
 initNetworkLogging();
 
@@ -2085,6 +2265,63 @@ async function finalizeScheduledRun() {
   if (!schedError && workTabId != null) { try { const tab = await chrome.tabs.get(workTabId); if (tab && tab.windowId != null) await chrome.windows.remove(tab.windowId); } catch {} }
   setTimeout(closeRunnerWindow, 1200);
 }
+// Runner mode for a scheduled PROCEDURE (?proc=<id>&tabId=<n>). Macro procs run replayMacroSteps
+// directly (no LLM, no model needed); AI procs build a prompt + sendPrompt (like scheduled tasks).
+async function startProcRun(procId) {
+  const p = procs.list.find(x => x.id === procId);
+  const fail = async (msg) => {
+    try { chrome.notifications.create({ type: "basic", iconUrl: "/icon-128.png", title: "Scheduled procedure could not run", message: msg }); } catch {}
+    if (p) { p.lastRun = Date.now(); p.lastStatus = "error"; await saveProcs(); }
+    setTimeout(closeRunnerWindow, 1500);
+  };
+  if (!p) return fail("Procedure not found (id " + procId + ").");
+  const hasSensitive = (p.steps || []).some(s => s.sensitive && s.encrypted);
+  if (hasSensitive && locked) return fail('"' + p.name + '": API keys / saved passwords are locked by your passphrase vault. Open the side panel and unlock once per browser session.');
+  if (p.mode === "ai" && !activePair()) return fail('"' + p.name + '": no active model configured in Providers.');
+  procRun = p; schedError = false;
+  confirmGate = false;                       // autonomous
+  const tid = await getTabId();
+  procRun.workTabId = tid;
+  if (tid != null) {
+    for (let i = 0; i < 30; i++) {
+      try { const tab = await chrome.tabs.get(tid); if (tab.status === "complete") break; } catch { break; }
+      await new Promise(r => setTimeout(r, 500));
+    }
+    await new Promise(r => setTimeout(r, 800));
+  }
+  if (p.mode === "macro") {
+    try { await replayMacroSteps(p, tid); finalizeProcRun(); }
+    catch (e) { schedError = true; finalizeProcRun(); }
+    return;
+  }
+  // AI: build the prompt from the trace + goal and run via sendPrompt (AgentCore fold path)
+  const trace = [];
+  for (let i = 0; i < (p.steps || []).length; i++) {
+    const s = p.steps[i]; let text = s.text;
+    if (s.sensitive) { try { text = await decryptStepText(s); } catch (e) { schedError = true; finalizeProcRun(); return; } }
+    trace.push(formatStepForPrompt(i + 1, s, text));
+  }
+  newChat();
+  const ta = root.querySelector('[data-chat="input"]');
+  if (!ta) { schedError = true; finalizeProcRun(); return; }
+  ta.value = buildProcPrompt(p, trace);
+  await sendPrompt();   // finishChat → finalizeProcRun when done
+}
+async function finalizeProcRun() {
+  if (!procRun) return;
+  const name = procRun.name, workTabId = procRun.workTabId, runId = procRun.id;
+  procRun = null;
+  confirmGate = !autoApprove;
+  const p = procs.list.find(x => x.id === runId);
+  if (p) { p.lastRun = Date.now(); p.lastStatus = schedError ? "error" : "ok"; await saveProcs(); }
+  const lastA = [...chat.messages].reverse().find(m => m.role === "assistant");
+  const bodyText = trunc(String(lastA && lastA.content || "").replace(/\[\[tool:[^\]]+\]\]/g, "").replace(/\s+/g, " ").trim(), 120);
+  try {
+    chrome.notifications.create({ type: "basic", iconUrl: "/icon-128.png", title: (schedError ? "⚠ " : "✓ ") + name, message: bodyText || (schedError ? "Procedure hit an error." : "Done."), priority: schedError ? 2 : 0 });
+  } catch {}
+  if (!schedError && workTabId != null) { try { const tab = await chrome.tabs.get(workTabId); if (tab && tab.windowId != null) await chrome.windows.remove(tab.windowId); } catch {} }
+  setTimeout(closeRunnerWindow, 1200);
+}
 
 // external MCP control channel: lets MCP clients (e.g. Claude Code) drive this browser
 const mcpES = new EventSource(`${BRAIN}/api/mcp_control`);
@@ -2104,4 +2341,11 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (changes[KEY]) { state = changes[KEY].newValue || state; if (!editing) render(); }
   if (changes[AUTO_KEY]) { autoApprove = !!changes[AUTO_KEY].newValue; if (!scheduledRun) confirmGate = !autoApprove; if (secOpen) render(); }
   if (changes[PROCS_KEY]) { procs = changes[PROCS_KEY].newValue || procs; if (!procs.list) procs.list = []; if (view === "procs" && !procEditing) render(); }
+});
+// Receive recorded steps from the actor content script (one per user interaction). The actor
+// is stateless and dies on navigation, so it emits each step immediately; the panel accumulates.
+chrome.runtime.onMessage.addListener((msg) => {
+  if (!msg || !msg.__nocdp_record || !recordSession || !recordSession.active) return;
+  recordSession.steps.push(msg.step);
+  renderRecordSteps();
 });
