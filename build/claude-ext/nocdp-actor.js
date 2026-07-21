@@ -203,9 +203,67 @@
     return { ok: true, type, key: p.key, didDefault };
   }
 
-  // --- Message listener (from the shim in the service worker) ---
+  // --- Snip crop overlay (real-page region selection for the side panel's snip tool) ---
+  // Shows a fixed full-viewport crosshair overlay on the ACTUAL page; the user drag-selects a
+  // rectangle in viewport CSS pixels. Calls onDone({rect, vw, vh, dpr}) when finished, or
+  // onDone(null) on Esc / too-small selection. The overlay removes itself before onDone so a
+  // subsequent captureVisibleTab won't include it.
+  function showSnipOverlay(onDone) {
+    const ov = document.createElement("div");
+    ov.style.cssText = "position:fixed;inset:0;z-index:2147483647;cursor:crosshair;background:transparent;";
+    const sel = document.createElement("div");
+    // The selection rect is transparent (page shows through inside it); a giant box-shadow
+    // dims everything OUTSIDE the rect, so the chosen region reads clearly.
+    sel.style.cssText = "position:absolute;border:1.5px solid #d9795a;background:transparent;box-shadow:0 0 0 9999px rgba(0,0,0,0.45);pointer-events:none;display:none;";
+    ov.appendChild(sel);
+    (document.body || document.documentElement).appendChild(ov);
+    let start = null;
+    const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+    const pos = (e) => ({ x: clamp(e.clientX, 0, innerWidth), y: clamp(e.clientY, 0, innerHeight) });
+    ov.onpointerdown = (e) => {
+      e.preventDefault(); e.stopPropagation();
+      start = pos(e);
+      sel.style.display = "block";
+      sel.style.left = start.x + "px"; sel.style.top = start.y + "px";
+      sel.style.width = "0px"; sel.style.height = "0px";
+    };
+    ov.onpointermove = (e) => {
+      if (!start) return;
+      const p = pos(e);
+      const x = Math.min(start.x, p.x), y = Math.min(start.y, p.y);
+      sel.style.left = x + "px"; sel.style.top = y + "px";
+      sel.style.width = Math.abs(p.x - start.x) + "px";
+      sel.style.height = Math.abs(p.y - start.y) + "px";
+    };
+    const finish = (rect) => { cleanup(); onDone(rect); };
+    const cleanup = () => { ov.remove(); document.removeEventListener("keydown", onKey); };
+    const onUp = (e) => {
+      if (!start) return;
+      const p = pos(e);
+      const r = { x: Math.min(start.x, p.x), y: Math.min(start.y, p.y), w: Math.abs(p.x - start.x), h: Math.abs(p.y - start.y) };
+      start = null;
+      if (r.w < 5 || r.h < 5) { finish(null); return; }   // a tiny drag = cancel
+      finish(r);
+    };
+    const onKey = (ev) => { if (ev.key === "Escape") { start = null; finish(null); } };
+    ov.onpointerup = onUp;
+    ov.onpointercancel = () => { start = null; finish(null); };
+    document.addEventListener("keydown", onKey);
+  }
+
+  // --- Message listener (from the shim in the service worker, and the side panel for snip) ---
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (!msg || !msg.__nocdp) return;
+    // snip is async (waits for the user to drag) — respond later, keep the channel open
+    if (msg.kind === "snip") {
+      showSnipOverlay((rect) => {
+        try {
+          if (!rect) sendResponse({ ok: true, cancelled: true });
+          else sendResponse({ ok: true, rect, vw: innerWidth, vh: innerHeight, dpr: devicePixelRatio });
+        } catch (_) {}
+      });
+      return true;
+    }
     let out;
     try {
       switch (msg.kind) {

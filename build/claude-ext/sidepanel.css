@@ -208,8 +208,8 @@ svg.defs { position: absolute; width: 0; height: 0; }
    VIEWS
    ============================================================ */
 .view { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-.view.providers, .view.history, .view.tasks { overflow-y: auto; padding: 6px 14px 20px; }
-.view.providers > .scroll, .view.history > .scroll, .view.tasks > .scroll { width: 100%; display: flex; flex-direction: column; gap: 12px; }
+.view.providers, .view.history, .view.tasks, .view.procs { overflow-y: auto; padding: 6px 14px 20px; }
+.view.providers > .scroll, .view.history > .scroll, .view.tasks > .scroll, .view.procs > .scroll { width: 100%; display: flex; flex-direction: column; gap: 12px; }
 .view::-webkit-scrollbar, .chat-log::-webkit-scrollbar { width: 4px; }
 .view::-webkit-scrollbar-thumb, .chat-log::-webkit-scrollbar-thumb { background: rgba(255,255,255,.3); border-radius: 999px; }
 .view::-webkit-scrollbar-track, .chat-log::-webkit-scrollbar-track { background: transparent; }
@@ -580,12 +580,27 @@ hr { border: none; border-top: 1px solid rgba(255,255,255,.22); margin: 4px 0; }
   border-radius: 21px; padding: 10px 12px 9px;
   --g-tint: rgba(255,255,255,0.08);
 }
-.composer textarea {
+/* textarea + optional square image thumb sit side by side; thumb on the left */
+.composer-body { display: flex; gap: 8px; align-items: stretch; }
+.composer-body textarea {
   border: none; background: transparent; resize: none; outline: none; box-shadow: none;
   font: inherit; font-size: 13px; line-height: 1.5; padding: 2px 4px;
-  max-height: 140px; color: var(--text); width: 100%; border-radius: 0;
+  max-height: 140px; color: var(--text); flex: 1 1 auto; min-width: 0; border-radius: 0;
 }
-.composer textarea:focus { box-shadow: none; }
+.composer-body textarea:focus { box-shadow: none; }
+/* square image-attachment thumbnail (object-fit: cover crops the image to a square) */
+.attach-thumb {
+  flex: none; width: 44px; height: 44px; border-radius: 10px;
+  background-size: cover; background-position: center; background-repeat: no-repeat;
+  position: relative; align-self: flex-end;   /* sit at the bottom, next to where text starts */
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.18), 0 2px 8px rgba(0,0,0,.3);
+}
+.attach-thumb .attach-x {
+  position: absolute; top: -6px; right: -6px; width: 17px; height: 17px; border-radius: 999px;
+  background: rgba(10,14,10,0.85); color: #fff; font-size: 10px; line-height: 17px; padding: 0;
+  display: grid; place-items: center; box-shadow: 0 1px 4px rgba(0,0,0,.4);
+}
+.attach-thumb .attach-x:hover { background: var(--accent-h, #d9795a); }
 .c-row { display: flex; align-items: center; gap: 7px; }
 
 /* context-window ring — thin-line donut that fills like a pie arc as the context grows */
@@ -712,12 +727,7 @@ hr { border: none; border-top: 1px solid rgba(255,255,255,.22); margin: 4px 0; }
 .attach-x { background: transparent; border: none; color: var(--muted); cursor: pointer; padding: 0 2px; font-size: 13px; line-height: 1; }
 .attach-x:hover { color: var(--accent-h); }
 
-/* snip overlay */
-.snip-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.86); z-index: 9999; display: flex; flex-direction: column; align-items: center; padding: 24px 10px 10px; }
-.snip-bar { color: #fff; font-size: 13px; margin-bottom: 8px; }
-.snip-stage { position: relative; line-height: 0; }
-.snip-img { display: block; max-width: 100%; max-height: calc(100vh - 80px); cursor: crosshair; touch-action: none; }
-.snip-rect { position: absolute; border: 2px solid #a9432c; background: rgba(169,67,44,.2); display: none; pointer-events: none; }
+/* (snip crop overlay now lives on the real page via nocdp-actor.js — no in-panel overlay CSS needed) */
 
 .sunburst { color: currentColor; }
 

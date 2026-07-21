@@ -32,6 +32,19 @@ let taskEditing = null;        // task object being edited in the Tasks view (nu
 let scheduledRun = null;       // the task driving THIS panel instance (runner mode)
 let schedError = false;        // did the scheduled run hit an error event?
 async function saveTasks() { await chrome.storage.local.set({ [TASKS_KEY]: tasks }); }
+
+// ---------- procedures (record/replay automations) ----------
+// A procedure is a recorded interaction flow replayed on-demand or on schedule.
+// mode "macro" = deterministic step replay via executeTool (no LLM); "ai" = feed the
+// recorded trace + goal into AgentCore so the agent adapts to the live page.
+// step shapes: navigate{url} · click{selector,n,text,button} · type{selector,n,text,sensitive,encrypted}
+//   · press{key} · scroll{x,y,dx,dy} · wait{ms}. schedule = null | {kind,every,at,enabled}.
+const PROCS_KEY = "nocdp_procs";
+let procs = { list: [] };
+let procEditing = null;        // draft being edited (mirrors taskEditing)
+let recordSession = null;      // { tabId, steps:[], url, active } while recording (Phase 3)
+let procRun = null;            // the proc being run autonomously by the runner (Phase 6)
+async function saveProcs() { await chrome.storage.local.set({ [PROCS_KEY]: procs }); }
 // Keep this schedule math in sync with nocdpRescheduleAll() in nocdp-scheduler.js.
 async function scheduleTaskAlarm(t) {
   const name = "nocdp_task_" + t.id;
@@ -91,7 +104,7 @@ const root = document.getElementById("root");
 
 // ---------- storage ----------
 async function load() {
-  const got = await chrome.storage.local.get([KEY, THEME_KEY, CONV_KEY, EFFORT_KEY, VAULT_KEY, TASKS_KEY, AUTO_KEY]);
+  const got = await chrome.storage.local.get([KEY, THEME_KEY, CONV_KEY, EFFORT_KEY, VAULT_KEY, TASKS_KEY, AUTO_KEY, PROCS_KEY]);
   state = got[KEY] || { providers: [], activeProviderId: null, activeModelId: null };
   if (!state.providers) state.providers = [];
   theme = got[THEME_KEY] || "dark";
@@ -104,6 +117,8 @@ async function load() {
   confirmGate = !autoApprove;
   tasks = got[TASKS_KEY] || { list: [] };
   if (!tasks.list) tasks.list = [];
+  procs = got[PROCS_KEY] || { list: [] };
+  if (!procs.list) procs.list = [];
   vault = got[VAULT_KEY] || { enabled: false, salt: null, canary: null };
   locked = false; vaultKey = null;
   if (vault.enabled && vault.salt) {
@@ -380,7 +395,7 @@ function render() {
   root.appendChild(renderNav());
   const v = document.createElement("div");
   v.className = "view " + view;
-  v.appendChild(view === "providers" ? renderProvidersView() : view === "history" ? renderHistoryView() : view === "tasks" ? renderTasksView() : renderChatView());
+  v.appendChild(view === "providers" ? renderProvidersView() : view === "history" ? renderHistoryView() : view === "tasks" ? renderTasksView() : view === "procs" ? renderProcsView() : renderChatView());
   root.appendChild(v);
   if (view === "chat") {
     const ta = v.querySelector('[data-chat="input"]'); if (ta && !chat.busy) ta.focus();
@@ -415,6 +430,8 @@ function renderNav() {
     ? `<div class="providers-pill glass"><span>Providers</span></div>`
     : view === "tasks"
     ? `<div class="providers-pill glass"><span>Scheduled Tasks</span></div>`
+    : view === "procs"
+    ? `<div class="providers-pill glass"><span>Procedures</span></div>`
     : `<div class="seg" data-sel="${view === "history" ? 1 : 0}">
         <div class="lens glass"></div>
         <button class="opt" data-nav="chat">Chat</button>
@@ -444,6 +461,7 @@ function renderProvidersView() {
       </div>
       <button class="icon-btn glass pressable ${vault.enabled ? "on" : ""}" data-act="sec" title="Key encryption: ${vault.enabled ? "ON — click to manage" : "off — click to enable"}">${TC_ICON('<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/><circle cx="12" cy="15.5" r=".8"/>')}</button>
       <button class="icon-btn glass pressable" data-act="tasks-view" title="Scheduled tasks">${TC_ICON('<circle cx="12" cy="13" r="7.5"/><path d="M12 9.5V13l2.5 2"/><path d="M5.2 3.2 3 5.4M18.8 3.2 21 5.4"/>')}</button>
+      <button class="icon-btn glass pressable" data-act="procs-view" title="Procedures (record & replay automations)">${TC_ICON('<path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v5h-5"/>')}</button>
     </div>`;
   wrap.appendChild(head);
   wrap.appendChild(renderActiveBar());
@@ -655,12 +673,23 @@ function renderComposer(pair) {
   const icon = stop
     ? '<svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>'
     : ICON("claude", 18);
-  const attachChip = chat.attachment ? `<div class="attach-chip glass" title="${esc(chat.attachment.name)}">${chat.attachment.image ? "🖼" : "📎"} ${esc(chat.attachment.name)} <button class="attach-x" data-act="remove-attach">✕</button></div>` : "";
+  // Image attachment -> square thumbnail inside the composer, left of the textarea.
+  // Non-image attachment -> text chip in a row above the composer (unchanged).
+  const a = chat.attachment;
+  const imgThumb = (a && a.image && a.dataUrl)
+    ? `<div class="attach-thumb" style="background-image:url('${a.dataUrl}')" title="${esc(a.name)}"><button class="attach-x" data-act="remove-attach" title="Remove image">✕</button></div>`
+    : "";
+  const fileChip = (a && !a.image)
+    ? `<div class="attach-chip glass" title="${esc(a.name)}">📎 ${esc(a.name)} <button class="attach-x" data-act="remove-attach">✕</button></div>`
+    : "";
   const thinkOn = chat.effort !== "off";
   const think = `<div class="think ${thinkOn ? "on" : ""}" data-act="think" title="Extended thinking on/off">${THINK_ICON}<div class="tswitch"><div class="tthumb glass"></div></div></div>`;
-  w.innerHTML = `${attachChip ? `<div class="attach-row">${attachChip}</div>` : ""}
+  w.innerHTML = `${fileChip ? `<div class="attach-row">${fileChip}</div>` : ""}
     <div class="composer glass">
-      <textarea data-chat="input" placeholder="How can I help u today..?" rows="1"></textarea>
+      <div class="composer-body${imgThumb ? " has-thumb" : ""}">
+        ${imgThumb}
+        <textarea data-chat="input" placeholder="How can I help u today..?" rows="1"></textarea>
+      </div>
       <div class="c-row">
         ${ctxRingHTML(chat.ctx)}
         <button class="icon-glyph" data-act="snip" title="Snip a screen region">${SNIP_ICON}</button>
@@ -671,7 +700,7 @@ function renderComposer(pair) {
       </div>
     </div>
     <input type="file" data-act="attach-input" hidden>
-    <div class="composer-hint"><span class="trusted-badge ${attachedTabs.size ? "on" : ""}" data-act="trusted" title="${attachedTabs.size ? "Trusted control ACTIVE — Chrome debugger attached (real_* mode). Chrome shows a 'debugging' banner on those tabs. Click for details." : "Stealth mode — real DOM events, no debugger, no banner. Lights up if the agent escalates to trusted (real_*) input."}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${SHIELD}<path d="m9 12 2 2 4-4"/></svg></span><span class="hint-left">Enter to send · Shift+Enter for newline${chat.attachment ? " · " + (chat.attachment.image ? "🖼 image attached" : "📎 attached") : ""}</span>${usageHudHTML(chat.usage)}</div>`;
+    <div class="composer-hint"><span class="trusted-badge ${attachedTabs.size ? "on" : ""}" data-act="trusted" title="${attachedTabs.size ? "Trusted control ACTIVE — Chrome debugger attached (real_* mode). Chrome shows a 'debugging' banner on those tabs. Click for details." : "Stealth mode — real DOM events, no debugger, no banner. Lights up if the agent escalates to trusted (real_*) input."}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${SHIELD}<path d="m9 12 2 2 4-4"/></svg></span><span class="hint-left">Enter to send · Shift+Enter for newline${a && !a.image ? " · 📎 attached" : ""}</span>${usageHudHTML(chat.usage)}</div>`;
   return w;
 }
 
@@ -771,6 +800,156 @@ function renderTaskEditor() {
     <div class="row" style="justify-content:center">
       <button class="btn good row" data-act="task-save" style="gap:6px">${ICON("done", 15)} Save</button>
       <button class="btn warn row" data-act="task-cancel" style="gap:6px">${ICON("close", 13)} Cancel</button>
+    </div>`;
+  return el;
+}
+
+// ---------- Procedures view ----------
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+async function waitForTabComplete(tabId, timeoutMs = 30000) {
+  for (let i = 0; i < Math.max(1, Math.floor(timeoutMs / 500)); i++) {
+    try { const tab = await chrome.tabs.get(tabId); if (tab.status === "complete") return true; } catch { return false; }
+    await sleep(500);
+  }
+  return false;
+}
+// Decrypt a step's text for replay (sensitive steps). Returns the plaintext; throws on
+// can't-decrypt (vault disabled/locked/wrong passphrase). Non-sensitive steps pass through.
+async function decryptStepText(step) {
+  if (!step.sensitive) return step.text;
+  if (step.encrypted) {
+    if (!vault.enabled) throw new Error("This procedure's password was encrypted with the vault, but the vault is now disabled. Re-enable and unlock it.");
+    if (!vaultKey) throw new Error("Unlock the passphrase vault to replay this procedure's password step.");
+    const pt = await vaultDecrypt(step.text, vaultKey);
+    if (pt == null) throw new Error("Could not decrypt the saved password (wrong passphrase or corrupted data).");
+    return pt;
+  }
+  return step.text;   // sensitive but stored plaintext (vault was off at record time)
+}
+// Deterministic macro replay: run each recorded step via executeTool (no LLM). Used for both
+// on-demand replay (runProcedure) and the scheduled runner (startProcRun, Phase 6).
+async function replayMacroSteps(proc, tabId) {
+  for (const step of (proc.steps || [])) {
+    switch (step.type) {
+      case "navigate":
+        await chrome.tabs.update(tabId, { url: step.url });
+        await waitForTabComplete(tabId); await sleep(600);
+        break;
+      case "click":
+        await executeTool("click", { n: step.n, selector: step.selector, text: step.text, button: step.button || "left" }, tabId);
+        break;
+      case "type": {
+        const text = await decryptStepText(step);
+        await executeTool("type", { selector: step.selector, text }, tabId);
+        break;
+      }
+      case "press":
+        await executeTool("press_key", { key: step.key }, tabId);
+        break;
+      case "scroll":
+        await executeTool("scroll", { x: step.x, y: step.y, dx: step.dx, dy: step.dy }, tabId);
+        break;
+      case "wait":
+        await sleep(step.ms || 500);
+        break;
+      default: break;
+    }
+    if (step.type !== "wait" && step.type !== "navigate") await sleep(200);   // small settle between actions
+  }
+}
+// Run a procedure by id (on-demand from the Procedures view). Macro = step replay (no LLM);
+// AI = feed the trace to AgentCore (Phase 5).
+async function runProcedure(id) {
+  const p = procs.list.find(x => x.id === id);
+  if (!p) return;
+  if (p.mode === "ai") { await runProcedureAI(p); return; }   // Phase 5
+  if (!(p.steps || []).length) { alert("This procedure has no steps yet — record it first."); return; }
+  // Macro replay: open proc.url in a new tab (don't hijack the user's current tab), then replay.
+  let workTabId;
+  try {
+    if (p.url) {
+      const t = await chrome.tabs.create({ url: p.url, active: true });
+      workTabId = t.id;
+      await waitForTabComplete(workTabId); await sleep(800);
+    } else {
+      workTabId = await getTabId();
+      if (workTabId == null) { alert("No active tab to replay on — set a Start URL in the procedure."); return; }
+    }
+    const prevGate = confirmGate;
+    confirmGate = false;   // autonomous replay — no per-step prompts
+    try { await replayMacroSteps(p, workTabId); }
+    finally { confirmGate = prevGate; }
+    p.lastRun = Date.now(); p.lastStatus = "ok"; await saveProcs();
+  } catch (e) {
+    p.lastRun = Date.now(); p.lastStatus = "error"; await saveProcs();
+    alert("Macro replay failed: " + String((e && e.message) || e));
+  }
+}
+async function runProcedureAI(proc) { /* Phase 5 */ }
+function describeProc(p) {
+  const n = (p.steps || []).length;
+  return (p.mode === "ai" ? "AI" : "Macro") + " · " + n + " step" + (n === 1 ? "" : "s") + " · " + esc(trunc(p.url || "current page", 30));
+}
+function renderProcsView() {
+  const wrap = document.createElement("div");
+  wrap.className = "scroll";
+  const head = document.createElement("div");
+  head.className = "between";
+  head.innerHTML = `
+    <div class="sec-pill glass"><span>Procedures</span></div>
+    <button class="icon-btn glass pressable" data-act="proc-add" title="New procedure">${ICON("plus", 18)}</button>`;
+  wrap.appendChild(head);
+  const note = document.createElement("div");
+  note.className = "muted";
+  note.style.cssText = "font-size:11px;padding:0 4px";
+  note.textContent = "Record a flow once, then replay it on-demand or on schedule. Macro mode replays your exact steps (no AI, free); AI mode feeds the recording to the agent so it adapts to page changes.";
+  wrap.appendChild(note);
+  if (!procs.list.length && !procEditing) {
+    const e = document.createElement("div");
+    e.className = "card glass empty";
+    e.innerHTML = `No procedures yet.<br><span class="muted">Tap ＋ to create one — record yourself doing a task, then replay it anytime.</span>`;
+    wrap.appendChild(e);
+  }
+  procs.list.forEach((p, i) => {
+    const card = document.createElement("div");
+    card.className = "card glass conv-row";
+    card.style.animationDelay = Math.min(i * 60, 420) + "ms";
+    card.innerHTML = `
+      <div class="between">
+        <strong>${esc(p.name || "(untitled procedure)")}</strong>
+        <div class="row" style="gap:6px">
+          <button class="btn small good" data-act="proc-run" data-id="${p.id}" title="Run now">▶</button>
+          <button class="icon-glyph" data-act="proc-edit" data-id="${p.id}" title="Edit">✎</button>
+          <button class="icon-glyph" data-act="proc-del" data-id="${p.id}" title="Delete">${ICON("remove", 20)}</button>
+        </div>
+      </div>
+      <div class="muted" style="font-size:11px">${describeProc(p)}${p.lastRun ? " · last: " + new Date(p.lastRun).toLocaleString() + (p.lastStatus === "error" ? ' · <span class="bad">failed</span>' : " ✓") : ""}</div>
+      <div class="muted" style="font-size:11px;opacity:.75">${esc(trunc(p.goal || "", 90))}</div>`;
+    wrap.appendChild(card);
+  });
+  if (procEditing) wrap.appendChild(renderProcEditor());
+  return wrap;
+}
+function renderProcEditor() {
+  const p = procEditing;
+  const el = document.createElement("div");
+  el.className = "card glass editor";
+  const stepsJson = (() => { try { return JSON.stringify(p.steps || [], null, 2); } catch { return "[]"; } })();
+  el.innerHTML = `
+    <div class="between"><h1 style="font-size:14px">Procedure</h1><button class="btn small warn" data-act="proc-close">✕</button></div>
+    <div class="field"><label>Name</label><input data-pf="name" placeholder="E.g; Download latest invoice" value="${esc(p.name)}"></div>
+    <div class="ptype" data-sel="${p.mode === "ai" ? 1 : 0}">
+      <div class="lens glass"></div>
+      <button class="opt" data-act="proc-mode" data-mode="macro">Macro</button>
+      <button class="opt" data-act="proc-mode" data-mode="ai">AI</button>
+    </div>
+    <div class="muted" style="font-size:11px;margin-top:-4px">${p.mode === "ai" ? "AI: the agent follows your recording but adapts to the live page (costs tokens)." : "Macro: replays your exact steps with no AI (free, fast, exact — brittle if the page changes)."}</div>
+    <div class="field"><label>Goal <span style="opacity:.55;font-weight:400">(what this procedure does — used by AI mode)</span></label><input data-pf="goal" placeholder="E.g; Log in and download the latest invoice PDF" value="${esc(p.goal || "")}"></div>
+    <div class="field"><label>Start URL <span style="opacity:.55;font-weight:400">(page to open first)</span></label><input data-pf="url" placeholder="https://example.com" value="${esc(p.url || "")}"></div>
+    <div class="field"><label>Steps <span style="opacity:.55;font-weight:400">(JSON — record will fill this; you can hand-edit)</span></label><textarea data-pf="stepsJson" rows="5" style="font-family:monospace;font-size:11px" placeholder='[{"type":"navigate","url":"https://example.com"},{"type":"click","selector":"a.more","n":0}]'>${esc(stepsJson)}</textarea></div>
+    <div class="row" style="justify-content:center">
+      <button class="btn good row" data-act="proc-save" style="gap:6px">${ICON("done", 15)} Save</button>
+      <button class="btn warn row" data-act="proc-cancel" style="gap:6px">${ICON("close", 13)} Cancel</button>
     </div>`;
   return el;
 }
@@ -1112,32 +1291,27 @@ async function handleSnip() {
   const tabId = await getTabId();
   if (tabId == null) { alert("No active tab to snip."); return; }
   const tab = await chrome.tabs.get(tabId);
+  // 1) ask the actor to show a crop overlay on the REAL page; user drag-selects a region
+  //    (in viewport CSS px). The overlay removes itself before responding, so the capture
+  //    below won't include it.
+  let resp;
+  try { resp = await sendToActor(tabId, { __nocdp: true, kind: "snip" }); }
+  catch (e) { alert("Snip couldn't reach the page: " + String((e && e.message) || e) + " — try a normal web page (chrome:// and Web Store block extensions)."); return; }
+  if (!resp || !resp.ok || resp.cancelled || !resp.rect) return;   // Esc / tiny drag = cancel
+  const { rect, vw, vh } = resp;
+  // 2) capture the visible viewport NOW (right after selection — page matches what the user saw)
   let fullUrl;
   try { fullUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" }); }
-  catch (e) { alert("Screen capture failed: " + e.message); return; }
-  showSnipOverlay(fullUrl);
+  catch (e) { alert("Screen capture failed: " + (e && e.message || e)); return; }
+  // 3) crop the captured image to the selected rect (scale CSS px → image px via vw/vh)
+  await cropCapture(fullUrl, rect, vw, vh);
 }
-function showSnipOverlay(dataUrl) {
-  const ov = document.createElement("div");
-  ov.className = "snip-overlay";
-  ov.innerHTML = `<div class="snip-bar">Drag to select a region · Esc to cancel</div><div class="snip-stage"><img class="snip-img"><div class="snip-rect"></div></div>`;
-  root.appendChild(ov);
-  const img = ov.querySelector(".snip-img"); img.src = dataUrl;
-  const rect = ov.querySelector(".snip-rect");
-  let start = null;
-  const pos = (e) => { const r = img.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; };
-  img.onpointerdown = (e) => { e.preventDefault(); img.setPointerCapture(e.pointerId); start = pos(e); rect.style.display = "block"; rect.style.left = start.x + "px"; rect.style.top = start.y + "px"; rect.style.width = "0px"; rect.style.height = "0px"; };
-  img.onpointermove = (e) => { if (!start) return; const p = pos(e); const x = Math.min(start.x, p.x), y = Math.min(start.y, p.y); rect.style.left = x + "px"; rect.style.top = y + "px"; rect.style.width = Math.abs(p.x - start.x) + "px"; rect.style.height = Math.abs(p.y - start.y) + "px"; };
-  img.onpointerup = async (e) => { if (!start) return; const p = pos(e); const r = { x: Math.min(start.x, p.x), y: Math.min(start.y, p.y), w: Math.abs(p.x - start.x), h: Math.abs(p.y - start.y) }; start = null; ov.remove(); if (r.w < 5 || r.h < 5) return; await doCrop(dataUrl, img, r); };
-  const esc = (ev) => { if (ev.key === "Escape") { ov.remove(); document.removeEventListener("keydown", esc); } };
-  document.addEventListener("keydown", esc);
-}
-async function doCrop(dataUrl, imgEl, r) {
-  const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = dataUrl; });
-  const scaleX = img.naturalWidth / imgEl.clientWidth, scaleY = img.naturalHeight / imgEl.clientHeight;
-  const sx = r.x * scaleX, sy = r.y * scaleY, sw = r.w * scaleX, sh = r.h * scaleY;
+async function cropCapture(dataUrl, rect, vw, vh) {
+  const img = await loadImg(dataUrl);
+  const scaleX = img.naturalWidth / vw, scaleY = img.naturalHeight / vh;
+  const sx = rect.x * scaleX, sy = rect.y * scaleY, sw = rect.w * scaleX, sh = rect.h * scaleY;
   const canvas = document.createElement("canvas");
-  canvas.width = Math.max(1, Math.round(r.w)); canvas.height = Math.max(1, Math.round(r.h));
+  canvas.width = Math.max(1, Math.round(rect.w)); canvas.height = Math.max(1, Math.round(rect.h));
   canvas.getContext("2d").drawImage(img, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
   const out = canvas.toDataURL("image/png");
   chat.attachment = { name: "snip.png", type: "image/png", size: Math.round(out.length * 0.75), base64: out.split(",")[1], image: true, dataUrl: out };
@@ -1699,6 +1873,36 @@ root.addEventListener("click", async (e) => {
       } catch (e2) { alert("Could not launch the task runner: " + e2.message); }
       break;
     }
+    // ---------- procedures ----------
+    case "procs-view": view = (view === "procs") ? "chat" : "procs"; procEditing = null; render(); break;
+    case "proc-add": procEditing = { id: "proc_" + Math.random().toString(36).slice(2, 10), name: "", mode: "macro", url: "", goal: "", steps: [], schedule: null, created: Date.now(), lastRun: null, lastStatus: null }; render(); break;
+    case "proc-edit": { const p2 = procs.list.find(x => x.id === id); if (p2) { procEditing = JSON.parse(JSON.stringify(p2)); render(); } break; }
+    case "proc-mode": { if (procEditing) { procEditing.mode = t.dataset.mode; render(); } break; }
+    case "proc-close": case "proc-cancel": procEditing = null; render(); break;
+    case "proc-save": {
+      if (!procEditing) break;
+      if (!procEditing.name.trim()) procEditing.name = trunc((procEditing.goal || "").trim() || "procedure", 30);
+      // parse the steps JSON textarea into the steps array
+      try { procEditing.steps = JSON.parse((root.querySelector('[data-pf="stepsJson"]')?.value) || "[]") || []; }
+      catch (e3) { alert("Steps JSON is invalid: " + e3.message); break; }
+      if (!Array.isArray(procEditing.steps)) { alert("Steps must be a JSON array."); break; }
+      const ip = procs.list.findIndex(x => x.id === procEditing.id);
+      if (ip >= 0) procs.list[ip] = procEditing; else procs.list.push(procEditing);
+      await saveProcs();
+      procEditing = null; render();
+      break;
+    }
+    case "proc-del": {
+      if (!confirm("Delete this procedure?")) break;
+      try { await chrome.alarms.clear("nocdp_proc_" + id); } catch {}
+      procs.list = procs.list.filter(x => x.id !== id);
+      await saveProcs(); render();
+      break;
+    }
+    case "proc-run": {
+      await runProcedure(id);   // Phase 2 (macro) / Phase 5 (AI)
+      break;
+    }
     case "think": {
       // Figma spec: thinking on/off liquid switch (replaces the effort dropdown).
       if (chat.effort === "off") chat.effort = chat.lastEffort || "medium";
@@ -1791,6 +1995,7 @@ root.addEventListener("input", (e) => {
     return;
   }
   if (t.dataset.tf !== undefined) { if (taskEditing) { const f = t.dataset.tf; taskEditing[f] = f === "every" ? (parseInt(t.value, 10) || "") : t.value; } return; }
+  if (t.dataset.pf !== undefined) { if (procEditing) { const f = t.dataset.pf; procEditing[f] = (f === "every") ? (parseInt(t.value, 10) || "") : t.value; } return; }
   if (!editing) return;
   if (t.dataset.f) editing[t.dataset.f] = t.value;
   if (t.dataset.mi !== undefined && t.dataset.idx !== undefined) { const m = editing.models[+t.dataset.idx]; if (m) { const mi = t.dataset.mi; m[mi] = mi === "ctxWindow" ? (t.value === "" ? "" : (parseInt(t.value, 10) || "")) : (t.type === "checkbox" ? t.checked : t.value); } }
@@ -1898,4 +2103,5 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "local") return;
   if (changes[KEY]) { state = changes[KEY].newValue || state; if (!editing) render(); }
   if (changes[AUTO_KEY]) { autoApprove = !!changes[AUTO_KEY].newValue; if (!scheduledRun) confirmGate = !autoApprove; if (secOpen) render(); }
+  if (changes[PROCS_KEY]) { procs = changes[PROCS_KEY].newValue || procs; if (!procs.list) procs.list = []; if (view === "procs" && !procEditing) render(); }
 });
