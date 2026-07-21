@@ -4,9 +4,17 @@
 
 **A Chrome extension that drives your browser like a human — no automation banner, no bot-detection trip, powered by your own API key.**
 
-Reads pages · clicks · types · navigates · fills forms · solves tasks — all through a **Liquid Glass** chat sidebar, or driven headlessly as an MCP server.
+Reads pages · clicks · types · navigates · fills forms · records & replays flows · runs on a schedule — all from a **Liquid Glass** chat sidebar.
 
 <sub>Anthropic's "Claude in Chrome" body · Antigravity's invisible hands · your key · a hand-built Apple-style UI</sub>
+
+<br/>
+
+[![Download](https://img.shields.io/badge/⬇_Download-Latest_Release-19c400?style=for-the-badge)](../../releases/latest)
+&nbsp;
+[![Chrome](https://img.shields.io/badge/Chrome-116%2B-4285F4?style=for-the-badge&logo=googlechrome&logoColor=white)](https://chrome.google.com)
+&nbsp;
+![Manifest V3](https://img.shields.io/badge/Manifest-V3-333?style=for-the-badge)
 
 <br/>
 
@@ -15,13 +23,13 @@ Reads pages · clicks · types · navigates · fills forms · solves tasks — a
     <td width="25%"><img src="docs/screenshots/01-new-chat.png" alt="New chat — glass composer, quick-prompt chips, drifting glow orbs"/></td>
     <td width="25%"><img src="docs/screenshots/02-chat.png" alt="Conversation — avatars, glass bubbles, tool chip, streaming"/></td>
     <td width="25%"><img src="docs/screenshots/03-history.png" alt="History — glass conversation cards"/></td>
-    <td width="25%"><img src="docs/screenshots/04-providers.png" alt="Providers — liquid toggle, model manager"/></td>
+    <td width="25%"><img src="docs/screenshots/04-providers.png" alt="Settings — providers, automation, appearance, security"/></td>
   </tr>
   <tr>
     <td align="center"><sub><b>New chat</b></sub></td>
     <td align="center"><sub><b>Conversation</b></sub></td>
     <td align="center"><sub><b>History</b></sub></td>
-    <td align="center"><sub><b>Providers</b></sub></td>
+    <td align="center"><sub><b>Settings</b></sub></td>
   </tr>
 </table>
 
@@ -33,7 +41,7 @@ Reads pages · clicks · types · navigates · fills forms · solves tasks — a
 
 Most browser-automation tools (Puppeteer, Playwright, Selenium, the Chrome DevTools MCP) drive Chrome through the **Chrome DevTools Protocol** — they attach a debugger to the tab. That instantly raises the *"Chrome is being controlled by automated software"* banner and flips every signal a bot detector looks for. There is no quiet way to use CDP.
 
-**This project never touches CDP for its default input.** The extension dispatches real `MouseEvent`/`KeyboardEvent` from a content script at page coordinates, screenshots via `chrome.tabs.captureVisibleTab`, and evaluates JS via `chrome.scripting` — ordinary extension APIs that leave no automation trace. The result reads as **"Definitely a Human"** on `bot.sannysoft.com`, `pixelscan.net`, and `fingerprint.com` (webdriver `false`, suspect-score `0`).
+**This project never touches CDP for its default input.** The extension dispatches real `MouseEvent` / `KeyboardEvent` from a content script at page coordinates, captures the screen via `chrome.tabs.captureVisibleTab`, and evaluates JS via `chrome.scripting` — ordinary extension APIs that leave no automation trace. The result reads as **"Definitely a Human"** on `bot.sannysoft.com`, `pixelscan.net`, and `fingerprint.com` (webdriver `false`, suspect-score `0`).
 
 It was built by reverse-engineering two extensions:
 
@@ -49,13 +57,75 @@ Anthropic's polished body + Antigravity's invisible hands, wearing a bespoke **L
 ## ✨ Highlights
 
 - 🕵️ **Invisible control** — synthetic-but-real DOM events, no debugger banner, passes bot detection.
-- 🔑 **Bring your own key** — any OpenAI-style *or* Anthropic-style endpoint: OpenAI, Anthropic, OpenRouter, GLM, MiniMax, DeepSeek, Groq, Ollama (local/cloud), vLLM, LM Studio, and more. Keys stay in `chrome.storage.local`, on-device, never synced.
-- 💬 **Liquid Glass UI** — Apple-inspired frosted-glass side panel: gel-spring segmented toggles, drifting glow orbs, real refraction (SVG displacement in `backdrop-filter`), Anthropic Serif Display type, true SSE token streaming, light + dark themes.
-- 🧠 **Real agent loop** — the local brain runs a proper tool-use loop with your model; the panel executes tools in the live tab and streams results back.
+- 🧠 **Self-contained agent** — the tool-use loop runs *inside* the extension. Just load it, add a key, and chat. No local server, no install script, nothing running in the background.
+- 🔑 **Bring your own key** — any OpenAI-style *or* Anthropic-style endpoint: OpenAI, Anthropic, OpenRouter, GLM, MiniMax, DeepSeek, Groq, Ollama (local/cloud), vLLM, LM Studio, and more. Multiple providers, switch the active one anytime.
+- 🎬 **Procedures** — record a flow once, then replay it on demand or on a schedule. Choose **Macro** (exact deterministic replay, zero tokens) or **AI** (the agent follows your recording but adapts to page changes). Logins supported, with passwords encrypted by the vault.
+- ⏰ **Scheduled tasks** — run any prompt on a timer (every N minutes or daily at a set time). Fires in a background window even when the panel is closed, as long as Chrome is open.
+- 🔐 **Key vault** — encrypt provider API keys and recorded passwords at rest (AES-GCM + PBKDF2, 210k iterations). Unlock once per browser restart. Changing or disabling the vault *requires* the current passphrase.
+- ⚡ **Auto-approve** — one toggle to let the agent run destructive actions (close tab, run JS, set/delete cookie) without pausing to ask.
+- 💬 **Liquid Glass UI** — Apple-inspired frosted-glass side panel: gel-spring toggles, drifting glow orbs, real refraction (SVG displacement in `backdrop-filter`), Anthropic Serif Display type, true SSE token streaming, light + dark themes.
 - 🖼️ **Vision-aware** — vision models get downscaled screenshots (image px == click coords); text-only models fall back to `read_page`, so every model works.
 - 🛡️ **Trusted-mode fallback** — anti-cheat / exam sites that ignore synthetic events? A `real_*` tool set escalates to genuine `chrome.debugger` CDP (`isTrusted:true`) — used only on demand, with Chrome's debugger banner as the honest tell.
-- 🔌 **MCP bridge** — expose the same browser to external clients (e.g. Claude Code) over stdio JSON-RPC.
-- 📎 **Batteries included** — conversation history, multi-tab control, file upload into page inputs, region-snip screenshots, cookie/network/DevTools tools, quick-prompt chips.
+- 🔌 **MCP bridge** *(optional)* — expose the same browser to external clients (e.g. Claude Code) over stdio JSON-RPC, via the bundled local brain.
+
+---
+
+## 🚀 Install
+
+### Option A — download the release (recommended)
+
+1. Grab **`nocdp-browser-agent.zip`** from the [latest release](../../releases/latest) and unzip it.
+2. Open `chrome://extensions` → toggle **Developer mode** on (top-right).
+3. **Load unpacked** → select the unzipped `claude-ext/` folder.
+4. Pin the extension and open the side panel (toolbar icon or **Cmd/Ctrl + E**).
+
+> If the official "Claude" extension is installed, disable it first to avoid an extension-ID clash.
+
+### Option B — from source
+
+```bash
+git clone https://github.com/SKgiet2021/Clau_Browser_Control.git
+# chrome://extensions → Developer mode → Load unpacked → build/claude-ext/
+```
+
+### First run
+
+Open the side panel → tap the **logo** (top-left) to open **Settings** → **PROVIDERS ＋ Add**:
+
+- Choose **OpenAI** or **Anthropic** style (the toggle swaps the Base URL hint).
+- Enter Base URL (with or without `/v1`) + API key → **Test Connection** → **Fetch Models**.
+- Tick **vision** on models that support it → **✓ Save**.
+- Back on **Chat**, pick the model from the input bar and start typing.
+
+That's it — chat works with **nothing else running**.
+
+---
+
+## 🖥️ Settings, at a glance
+
+The Settings page (logo, top-left) is organized into four sections:
+
+| Section | What's there |
+|---------|--------------|
+| **Providers** | Add / edit endpoints, fetch models, pick the active provider. |
+| **Automation** | **Scheduled tasks** and **Procedures** — record, schedule, and manage automations. |
+| **Appearance** | Light / dark / system theme. |
+| **Security** | **Auto-approve** toggle and the **Key encryption** vault. |
+
+---
+
+## 🎬 Procedures — record & replay
+
+Teach the agent a flow once and have it run itself.
+
+1. **Settings → Automation → Procedures → ＋**, give it a name and a start URL.
+2. Pick a mode:
+   - **Macro** — replays your exact recorded steps (clicks, typing, keys, scrolls, navigation). Deterministic, instant, **spends no tokens**.
+   - **AI** — feeds your recording + a goal to the agent, which adapts if the page changed. Costs tokens, survives layout shifts.
+3. Hit **● Record**, perform the flow in the real page, then **Stop & Save**.
+4. Run it with **▶**, or set a **Schedule** (every N minutes / daily at a time).
+
+**Logins** are supported — recorded password fields are flagged sensitive and encrypted with the vault (enable it first). Recording follows you across page navigations. *Limits:* no capture inside cross-origin iframes / shadow DOM (use AI mode), 2FA codes can't be replayed (record the post-login flow), and `chrome://` / Web Store pages can't be recorded.
 
 ---
 
@@ -64,59 +134,30 @@ Anthropic's polished body + Antigravity's invisible hands, wearing a bespoke **L
 ```
 ┌───────────────────────────── Chrome ─────────────────────────────┐
 │  Side panel  (build/claude-ext)                                   │
-│   ├─ Liquid Glass chat UI — streaming, history, providers, themes │
-│   └─ No-CDP tool executor — content-script DOM events,            │
-│      captureVisibleTab, chrome.scripting, cookies, webRequest,    │
-│      declarativeNetRequest, + real_* CDP escalation on demand     │
 │                                                                   │
-│        ▲ SSE  /api/events            ▼ POST /api/start            │
-│        │      /api/mcp_control              /api/tool_result       │
-│        │                                    /api/stop  /api/…      │
-│        ▼▲  http://127.0.0.1:7878                                   │
+│   ├─ Liquid Glass chat UI — streaming, history, settings, themes  │
+│   ├─ agent-core.js — the LLM tool-use loop, INSIDE the extension  │
+│   │     └─ talks straight to YOUR provider (OpenAI/Anthropic API) │
+│   ├─ No-CDP tool executor — content-script DOM events,            │
+│   │     captureVisibleTab, chrome.scripting, cookies, webRequest  │
+│   ├─ Procedures — record / macro-replay / AI-replay               │
+│   ├─ Scheduler — chrome.alarms → background task & procedure runs │
+│   └─ real_* CDP escalation, on demand only                        │
 │                                                                   │
-│  Local brain  (build/brain/brain.js — zero-dependency Node)       │
-│   ├─ Agent loop: true token streaming + tool-use                  │
-│   ├─ Talks to YOUR provider (OpenAI- or Anthropic-style)          │
-│   └─ MCP bridge  (/api/mcp_*)                                     │
-│                                                                   │
-│        ▲ stdio JSON-RPC                                           │
-│  build/brain/mcp.js  ← external MCP clients (Claude Code, …)      │
+│  Local brain  (build/brain — OPTIONAL, for the MCP bridge only)   │
+│   └─ mcp.js — stdio JSON-RPC so external clients (Claude Code)    │
+│        can drive the same browser. Auto-spawned when launched.    │
 └───────────────────────────────────────────────────────────────────┘
 ```
 
-The **brain** is the LLM loop (it holds no browser powers). The **side panel** is the body that executes every tool in Chrome. They talk over SSE + POST on `127.0.0.1:7878`.
+**The whole agent lives in the extension.** Chatting, procedures, and scheduled tasks need nothing running locally. The Node **brain** is now optional — it exists only to bridge the browser to external **MCP** clients.
 
----
+### (Optional) drive from Claude Code
 
-## 🚀 Quick start
-
-### 1 · Load the extension
-1. Open `chrome://extensions` → toggle **Developer mode** on.
-2. **Load unpacked** → select `build/claude-ext/`.
-3. If the official "Claude" extension is installed, disable it to avoid an ID clash.
-
-### 2 · Start the brain
-```bash
-bash build/brain/start.sh          # runs in background, logs → build/brain/brain.log
-# foreground:  node build/brain/brain.js
-# stop:        bash build/brain/stop.sh
-# auto-start at login (optional):  bash build/brain/install.sh
-```
-
-### 3 · Add a provider
-Open the side panel (extension icon or **Cmd+E**) → tap the **logo** (top-left) → **＋**:
-- Choose **OpenAI** or **Anthropic** style (the toggle swaps the Base URL hint).
-- Enter Base URL (with or without `/v1`) + API key → **Test Connection** → **Fetch Models**.
-- Tune each model's display name, tick **vision** where supported → **✓ Save**.
-- Pick one as the **Active model**.
-
-### 4 · Chat
-Back on **Chat**, type a prompt or tap a quick chip — *Solve the questions*, *Summarize this page*, *Fill the form*. The agent reads the active tab and acts. Flip the **Thinking** switch for extended reasoning.
-
-### 5 · (Optional) Drive from Claude Code
 ```json
 "nocdp-browser": { "command": "node", "args": ["/abs/path/build/brain/mcp.js"] }
 ```
+
 Keep the side panel open while an external client drives it.
 
 ---
@@ -144,6 +185,7 @@ The side panel is a hand-written, framework-free UI (`sidepanel.js` string templ
 - **Depth** — four drifting radial-gradient glow orbs float behind everything.
 - **Type** — Anthropic Serif Display (bundled woff2), true SSE streaming with a live caret.
 - **Chat** — Clawd + Batman avatars, glass message bubbles, an always-visible model-name + copy row under each reply.
+- **Composer** — pie-ring context meter, region-snip (crop on the *real* page), file attach, per-message Thinking toggle, inline model picker.
 - **Themes** — full dark + light, plus system-follow.
 
 Icons are exported from the Figma prototype and shipped as PNGs in `build/claude-ext/figma-icons/`. A standalone reference prototype lives in `liquid-glass-demo/index.html`.
@@ -155,44 +197,31 @@ Icons are exported from the Figma prototype and shipped as PNGs in `build/claude
 ```
 Extention_rev/
 ├── build/
-│   ├── claude-ext/              # the extension you load
+│   ├── claude-ext/                # ← the extension you load
 │   │   ├── manifest.json
-│   │   ├── sidepanel.html / .js / .css   # Liquid Glass UI + no-CDP tool executor
-│   │   ├── nocdp-shim.js         # monkey-patches chrome.debugger → no-CDP (no banner)
-│   │   ├── nocdp-actor.js        # content script: real DOM events + dialogs
-│   │   ├── figma-icons/          # UI icons exported from the Figma prototype
-│   │   └── assets/               # Anthropic fonts + original tool engine
-│   └── brain/
-│       ├── brain.js              # local brain: SSE+POST server, streaming agent loop
-│       ├── mcp.js                # stdio MCP server for external clients
-│       ├── start.sh / stop.sh    # manual control
-│       └── install.sh / uninstall.sh   # optional launchd auto-start
-├── liquid-glass-demo/           # standalone UI reference prototype (index.html)
-├── fcoeoabgfenejglbffodgkkbkcdhcgfn/   # original Claude extension (RE source)
-├── eeijfnjmjelapkebgockoeaadonbchdd/    # original Antigravity extension (RE source)
-├── claude_ui_clone_spec.md
-├── design-brief-for-open-design.md
+│   │   ├── sidepanel.html/.js/.css  # Liquid Glass UI + no-CDP tool executor
+│   │   ├── agent-core.js            # the agent LLM loop (runs in-extension)
+│   │   ├── nocdp-shim.js            # neutralizes chrome.debugger by default (no banner)
+│   │   ├── nocdp-actor.js           # content script: real DOM events, snip, recording
+│   │   ├── nocdp-scheduler.js       # chrome.alarms → background task/procedure runs
+│   │   ├── figma-icons/             # UI icons exported from the Figma prototype
+│   │   └── assets/                  # Anthropic fonts + original tool engine
+│   └── brain/                     # OPTIONAL — MCP bridge for external clients
+│       ├── mcp.js                   # stdio MCP server (auto-spawns the relay)
+│       ├── brain.js                 # legacy SSE+POST agent server (fallback)
+│       └── start.sh / stop.sh / install.sh
+├── liquid-glass-demo/             # standalone UI reference prototype (index.html)
+├── docs/screenshots/              # README imagery
 └── README.md
 ```
 
 ---
 
-## ✅ Status & 🔭 roadmap
+## 🔒 Security & responsible use
 
-**Working end-to-end** — no-CDP stealth (bot-sweep verified), universal provider config, streaming chat, conversation history, multi-tab, file upload, vision/screenshot, DevTools tools, `real_*` trusted fallback, MCP bridge, and the full Liquid Glass UI.
-
-**Next up:**
-- 🗂️ **Tool-call activity stream** — render tool calls as rich collapsible cards (name · args · status · folded result) with inline screenshot thumbnails, instead of plain chips.
-- 🔐 **API-key reveal toggle** & **trusted-mode indicator** in the panel.
-- ✂️ **History trimming** — drop old `read_page` bodies to keep long sessions inside the context window.
-- 🔬 **Research / Deep-Research mode** (multi-site → `.md` report) — gated on history trimming.
-- 📄 **PDF text extraction** — currently metadata-only for PDFs.
-
----
-
-## 🔒 Scope & responsible use
-
-Built for **personal automation, accessibility, testing your own sites, and avoiding false-positive bot blocks on legitimate browsing** — with your own credentials and your own API key. It is not a scraping fleet, a credential-stuffing tool, or a generalized anti-detection service. Use it on sites and tasks you're authorized to automate.
+- **Keys & passwords** stay on-device in `chrome.storage.local`, never synced. Enable the **vault** to encrypt them at rest; changing or disabling it requires the current passphrase.
+- **Auto-approve is off by default** — destructive tools prompt until you opt in. Scheduled/automated runs auto-approve by design (there's no one to ask).
+- Built for **personal automation, accessibility, testing your own sites, and avoiding false-positive bot blocks on legitimate browsing** — with your own credentials and your own API key. It is not a scraping fleet, a credential-stuffing tool, or a generalized anti-detection service. Use it on sites and tasks you're authorized to automate.
 
 ---
 
