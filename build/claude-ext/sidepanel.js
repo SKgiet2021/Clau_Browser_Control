@@ -6,6 +6,7 @@ const KEY = "nocdp_providers";
 const THEME_KEY = "nocdp_theme";
 const CONV_KEY = "nocdp_conversations";
 const EFFORT_KEY = "nocdp_effort";
+const AUTO_KEY = "nocdp_auto_approve";   // when true, the agent acts without per-action confirmation prompts
 const BRAIN = "http://127.0.0.1:7878";
 
 const uid = () => "p_" + Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
@@ -15,6 +16,7 @@ let theme = "dark";
 let editing = null;
 let secOpen = false;
 let view = "chat";
+let autoApprove = false;   // persisted via AUTO_KEY — when true, destructive tool calls skip the confirm() prompt
 
 let chat = { messages: [], busy: false, sessionId: null, evtSource: null, coreSession: null, attachment: null, effort: "off", ctx: null, usage: null };
 let thinkingEl = null;
@@ -33,6 +35,7 @@ async function saveTasks() { await chrome.storage.local.set({ [TASKS_KEY]: tasks
 // Keep this schedule math in sync with nocdpRescheduleAll() in nocdp-scheduler.js.
 async function scheduleTaskAlarm(t) {
   const name = "nocdp_task_" + t.id;
+  if (!chrome.alarms) { console.warn("[tasks] chrome.alarms unavailable — scheduled tasks need the 'alarms' permission. Reload the extension after updating manifest.json."); return; }
   try { await chrome.alarms.clear(name); } catch {}
   if (!t.enabled) return;
   try {
@@ -88,7 +91,7 @@ const root = document.getElementById("root");
 
 // ---------- storage ----------
 async function load() {
-  const got = await chrome.storage.local.get([KEY, THEME_KEY, CONV_KEY, EFFORT_KEY, VAULT_KEY, TASKS_KEY]);
+  const got = await chrome.storage.local.get([KEY, THEME_KEY, CONV_KEY, EFFORT_KEY, VAULT_KEY, TASKS_KEY, AUTO_KEY]);
   state = got[KEY] || { providers: [], activeProviderId: null, activeModelId: null };
   if (!state.providers) state.providers = [];
   theme = got[THEME_KEY] || "dark";
@@ -97,6 +100,8 @@ async function load() {
   convs.currentId = null; // always open to a fresh New Chat; previous conversations stay in History
   chat.messages = [];
   chat.effort = got[EFFORT_KEY] || "off";
+  autoApprove = !!got[AUTO_KEY];
+  confirmGate = !autoApprove;
   tasks = got[TASKS_KEY] || { list: [] };
   if (!tasks.list) tasks.list = [];
   vault = got[VAULT_KEY] || { enabled: false, salt: null, canary: null };
@@ -119,8 +124,10 @@ function applyTheme() { const d = document.documentElement; if (theme === "syste
 
 function activePair() {
   const p = state.providers.find(x => x.id === state.activeProviderId);
-  const m = p && p.models.find(x => x.id === state.activeModelId);
-  return p && m ? { p, m } : null;
+  if (!p) return null;
+  let m = p.models.find(x => x.id === state.activeModelId);
+  if (!m) m = p.models[0];   // fall back to the provider's first model if state is stale
+  return m ? { p, m } : null;
 }
 
 // ---------- provider config helpers ----------
@@ -193,19 +200,30 @@ const trunc = (s, n) => { s = String(s ?? ""); return s.length > n ? s.slice(0, 
 const fmtK = (n) => { n = Math.max(0, Math.floor(n || 0)); return n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1).replace(/\.0$/, "") + "k" : String(n); };
 const ctxColor = (pct) => pct > 85 ? "#d4604a" : pct > 60 ? "#d4a84a" : "#6a9a7a";
 const ctxPctOf = (ctx) => ctx && ctx.limit ? Math.min(100, Math.round(ctx.used / ctx.limit * 100)) : 0;
+const CTX_R = 7.5, CTX_C = 2 * Math.PI * CTX_R;   // donut geometry: 20px svg, 3px stroke, 9px hole
+const fmtFull = (n) => Math.max(0, Math.floor(n || 0)).toLocaleString();   // "10,000" with thousands separators
+function ctxTitle(ctx, pct) {
+  return ctx ? "Context window: " + fmtFull(ctx.used) + "/" + fmtFull(ctx.limit) + " (" + pct + "%)" : "Context usage will appear here once the agent starts";
+}
 function ctxRingHTML(ctx) {
   const pct = ctxPctOf(ctx);
-  return `<div class="ctx-ring" data-act="ctx" style="--ctx-pct:${pct};--ctx-col:${ctxColor(pct)}" title="Context window: ${ctx ? fmtK(ctx.used) + " / " + fmtK(ctx.limit) + " tokens (" + pct + "%)" : "Context usage will appear here once the agent starts"}"><div class="ctx-ring-inner"><span class="ctx-pct">${ctx ? pct + "%" : ""}</span></div></div>`;
+  const dash = CTX_C * (pct / 100);
+  return `<svg class="ctx-ring" data-act="ctx" width="20" height="20" viewBox="0 0 20 20" title="${ctxTitle(ctx, pct)}">
+    <circle class="ctx-track" cx="10" cy="10" r="${CTX_R}" fill="none" stroke-width="3"/>
+    <circle class="ctx-fill" cx="10" cy="10" r="${CTX_R}" fill="none" stroke-width="3" stroke-linecap="round"
+      stroke="${ctxColor(pct)}" stroke-dasharray="${dash} ${CTX_C}" stroke-dashoffset="0" transform="rotate(-90 10 10)"/>
+  </svg>`;
 }
 function updateCtxRing() {
   const el = root.querySelector(".ctx-ring");
   if (!el) return;
   const pct = ctxPctOf(chat.ctx);
-  el.style.setProperty("--ctx-pct", pct);
-  el.style.setProperty("--ctx-col", ctxColor(pct));
-  el.title = chat.ctx ? "Context window: " + fmtK(chat.ctx.used) + " / " + fmtK(chat.ctx.limit) + " tokens (" + pct + "%)" : "Context usage will appear here once the agent starts";
-  const span = el.querySelector(".ctx-pct");
-  if (span) span.textContent = chat.ctx ? pct + "%" : "";
+  const fill = el.querySelector(".ctx-fill");
+  if (fill) {
+    fill.setAttribute("stroke-dasharray", (CTX_C * pct / 100) + " " + CTX_C);
+    fill.style.stroke = ctxColor(pct);
+  }
+  el.title = ctxTitle(chat.ctx, pct);
 }
 function usageHudHTML(u) {
   if (!u || (!u.total && !u.turns)) return `<span class="usage-hud muted" title="Real token usage will appear here once the agent starts">—</span>`;
@@ -230,6 +248,8 @@ function updateUsageHud() {
 }
 const TC_ICON = (inner) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${inner}</svg>`;
 const CHEV_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>`;
+// clean thin-line vision marker (replaces the creepy 👁 emoji on vision models)
+const VISION_EYE = `<svg class="vis-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-label="vision"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="2.6"/></svg>`;
 const SHIELD = '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>';
 const TOOL_META = {
   read_page:        { name: "Read page",     icon: TC_ICON('<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 13h8"/><path d="M8 17h8"/>') },
@@ -416,12 +436,12 @@ function renderProvidersView() {
   head.innerHTML = `
     <div class="sec-pill glass"><span>Providers</span></div>
     <div class="row">
+      <button class="icon-btn glass pressable" data-act="add" title="Add provider">${ICON("plus", 18)}</button>
       <div class="theme-switch">
         <button data-act="theme" data-theme="light" class="${theme === "light" ? "active" : ""}">☀</button>
         <button data-act="theme" data-theme="dark" class="${theme === "dark" ? "active" : ""}">☾</button>
         <button data-act="theme" data-theme="system" class="${theme === "system" ? "active" : ""}">Auto</button>
       </div>
-      <button class="icon-btn glass pressable" data-act="add" title="Add provider">${ICON("plus", 18)}</button>
       <button class="icon-btn glass pressable ${vault.enabled ? "on" : ""}" data-act="sec" title="Key encryption: ${vault.enabled ? "ON — click to manage" : "off — click to enable"}">${TC_ICON('<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/><circle cx="12" cy="15.5" r=".8"/>')}</button>
       <button class="icon-btn glass pressable" data-act="tasks-view" title="Scheduled tasks">${TC_ICON('<circle cx="12" cy="13" r="7.5"/><path d="M12 9.5V13l2.5 2"/><path d="M5.2 3.2 3 5.4M18.8 3.2 21 5.4"/>')}</button>
     </div>`;
@@ -435,14 +455,23 @@ function renderProvidersView() {
 function renderActiveBar() {
   const el = document.createElement("div");
   el.className = "card glass";
-  const pairs = [];
-  for (const p of state.providers) for (const m of p.models) pairs.push([p, m]);
-  if (!pairs.length) { el.innerHTML = `<div class="muted" style="font-size:12px">No model active. Add a provider and fetch models, then pick one.</div>`; return el; }
+  if (!state.providers.length) { el.innerHTML = `<div class="muted" style="font-size:12px">No provider yet. Add one with ＋ above, then fetch its models.</div>`; return el; }
+  const active = state.providers.find(p => p.id === state.activeProviderId) || state.providers[0];
+  if (state.providers.length === 1) {
+    el.innerHTML = `
+      <label>Active provider</label>
+      <div class="gpick-name" style="padding:4px 0">${esc(active.name)}</div>
+      <div class="muted" style="font-size:11px;margin-top:4px">Pick the AI model from the chat input bar.</div>`;
+    return el;
+  }
+  const opts = state.providers.map(p => `<button class="gpick-opt ${p.id === active.id ? "sel" : ""}" data-act="pick-prov" data-pid="${esc(p.id)}">${esc(p.name)}</button>`).join("");
   el.innerHTML = `
-    <label>Active model (this session)</label>
-    <select data-act="active">
-      ${pairs.map(([p, m]) => `<option value="${p.id}|${m.id}" ${state.activeProviderId === p.id && state.activeModelId === m.id ? "selected" : ""}>${esc(p.name)} · ${esc(m.displayName || m.id)}${m.vision ? " 👁" : ""}</option>`).join("")}
-    </select>`;
+    <label>Active provider</label>
+    <div class="gpick down" data-act="prov-menu" title="Switch provider">
+      <span class="gpick-name">${esc(active.name)}</span>
+      <div class="gpick-menu glass">${opts}</div>
+    </div>
+    <div class="muted" style="font-size:11px;margin-top:4px">Pick the AI model from the chat input bar.</div>`;
   return el;
 }
 function renderProviderList() {
@@ -470,9 +499,26 @@ function renderProviderList() {
 }
 function renderSecurity() {
   const el = document.createElement("div");
-  el.className = "card glass editor";
+  el.className = "col";
+  el.style.gap = "10px";
+  // Auto-approve switch — when on, the agent runs destructive tools (close tab, eval,
+  // set/delete cookie) without a confirm() prompt. Navigate never prompts either way.
+  const auto = document.createElement("div");
+  auto.className = "card glass editor";
+  auto.innerHTML = `
+    <div class="between">
+      <h1 style="font-size:14px">Auto-approve actions</h1>
+      <div class="think ${autoApprove ? "on" : ""}" data-act="auto-approve" title="When on, the agent closes tabs, runs JS, and changes cookies without asking. Navigate never asks either way.">
+        <span class="tl">${autoApprove ? "ON" : "OFF"}</span>
+        <div class="tswitch"><div class="tthumb glass"></div></div>
+      </div>
+    </div>
+    <p class="muted" style="font-size:12px">Let the agent work without pausing to ask. Navigating to pages always runs silently; this controls the destructive actions (close tab, run JS, set/delete cookie). Scheduled tasks auto-approve regardless.</p>`;
+  el.appendChild(auto);
+  const vaultCard = document.createElement("div");
+  vaultCard.className = "card glass editor";
   if (vault.enabled) {
-    el.innerHTML = `
+    vaultCard.innerHTML = `
     <div class="between"><h1 style="font-size:14px">🔒 Key encryption <span class="badge good">ON</span></h1><button class="btn small warn" data-act="sec-close">✕</button></div>
     <p class="muted" style="font-size:12px">API keys are encrypted at rest. You'll enter your passphrase once per browser restart to unlock.</p>
     <div class="field"><label>Current passphrase <span class="muted" style="font-weight:400">(required)</span></label><input data-sec="cur" type="password" placeholder="Current passphrase" autocomplete="current-password"></div>
@@ -484,7 +530,7 @@ function renderSecurity() {
       <button class="btn warn" data-act="sec-disable">Turn off</button>
     </div>`;
   } else {
-    el.innerHTML = `
+    vaultCard.innerHTML = `
     <div class="between"><h1 style="font-size:14px">🔒 Key encryption</h1><button class="btn small warn" data-act="sec-close">✕</button></div>
     <p class="muted" style="font-size:12px">Set a passphrase to encrypt your provider API keys at rest (AES-GCM + PBKDF2, 210k iterations). You'll enter it once per browser restart to unlock.</p>
     <div class="field"><label>Passphrase</label><input data-sec="pp" type="password" placeholder="Choose a passphrase" autocomplete="new-password"></div>
@@ -494,6 +540,7 @@ function renderSecurity() {
       <button class="btn good" data-act="sec-enable">Enable encryption</button>
     </div>`;
   }
+  el.appendChild(vaultCard);
   return el;
 }
 function renderEditor() {
@@ -509,7 +556,7 @@ function renderEditor() {
     </div>
     <div class="field"><label>Display name <span style="opacity:.55;font-weight:400">(shown in chat)</span></label><input data-f="name" placeholder="E.g; My OpenAI" value="${esc(p.name)}"></div>
     <div class="field"><label>Base URL</label><input data-f="baseUrl" placeholder="${p.style === "anthropic" ? "https://api.anthropic.com" : "https://api.openai.com/v1"}" value="${esc(p.baseUrl)}"></div>
-    <div class="field"><label>API KEY <button class="reveal-btn" data-act="reveal-key" type="button" title="Show / hide">👁</button></label><input data-f="apiKey" type="password" placeholder="E.g; sk-****" value="${esc(p.apiKey)}"></div>
+    <div class="field"><label>API KEY <button class="reveal-btn" data-act="reveal-key" type="button" title="Show / hide">${VISION_EYE}</button></label><input data-f="apiKey" type="password" placeholder="E.g; sk-****" value="${esc(p.apiKey)}"></div>
     <div class="row" style="justify-content:center;margin-top:2px">
       <button class="btn small warn" data-act="test">Test Connection</button>
       <button class="btn small good" data-act="fetch">Fetch Models</button>
@@ -580,12 +627,28 @@ function renderMessage(msg) {
     el.innerHTML = `${ICON("clawd", 22, "avatar")}<div class="content">${renderAssistant(msg.content, msg.tools)}</div>${assistantMeta()}`;
   return el;
 }
-const SNIP_ICON = ICON("control", 22);
-const ATTACH_ICON = ICON("add-circle", 24);
+const SNIP_ICON = ICON("snip", 22);
+const ATTACH_ICON = ICON("attach", 24);
+const THINK_ICON = ICON("thinking", 18);   // brain glyph for the thinking toggle (replaces the word)
+// Model picker in the composer — lists the active provider's models. No dropdown arrow:
+// clicking the name opens a glass menu. Provider is chosen in the Providers view.
+// Shares the .gpick classes with the provider picker so the two dropdowns look identical.
+function modelPickerHTML(pair) {
+  if (!pair) return `<div class="model-chip glass" data-act="logo" title="No provider — open Providers">No provider</div>`;
+  if (pair.p.models.length <= 1) {
+    // single model — just show it (still re-pickable if more get added later)
+    return `<div class="model-chip glass" title="${esc(pair.p.name)} · ${esc(pair.m.displayName || pair.m.id)}">${esc(pair.m.displayName || pair.m.id)}${pair.m.vision ? VISION_EYE : ""}</div>`;
+  }
+  const opts = pair.p.models.map(m => `<button class="gpick-opt ${m.id === pair.m.id ? "sel" : ""}" data-act="pick-model" data-mid="${esc(m.id)}">${esc(m.displayName || m.id)}${m.vision ? VISION_EYE : ""}</button>`).join("");
+  return `<div class="gpick up" data-act="model-menu" title="Switch model">
+    <span class="gpick-name">${esc(pair.m.displayName || pair.m.id)}</span>
+    <div class="gpick-menu glass">${opts}</div>
+  </div>`;
+}
 function renderComposer(pair) {
   const w = document.createElement("div");
   w.className = "composer-wrap";
-  const modelChip = pair ? `<div class="model-chip glass" data-act="logo" title="Switch model">${esc(pair.m.displayName || pair.m.id)} ⌄</div>` : `<div class="model-chip glass" data-act="logo">No model ⌄</div>`;
+  const modelChip = modelPickerHTML(pair);
   const stop = chat.busy;
   const sendClass = stop ? "send stop" : "send send-off";
   const sendAct = stop ? 'data-act="stop"' : 'data-act="send"';
@@ -594,16 +657,16 @@ function renderComposer(pair) {
     : ICON("claude", 18);
   const attachChip = chat.attachment ? `<div class="attach-chip glass" title="${esc(chat.attachment.name)}">${chat.attachment.image ? "🖼" : "📎"} ${esc(chat.attachment.name)} <button class="attach-x" data-act="remove-attach">✕</button></div>` : "";
   const thinkOn = chat.effort !== "off";
-  const think = `<div class="think ${thinkOn ? "on" : ""}" data-act="think" title="Extended thinking on/off"><span class="tl">Thinking</span><div class="tswitch"><div class="tthumb glass"></div></div></div>`;
+  const think = `<div class="think ${thinkOn ? "on" : ""}" data-act="think" title="Extended thinking on/off">${THINK_ICON}<div class="tswitch"><div class="tthumb glass"></div></div></div>`;
   w.innerHTML = `${attachChip ? `<div class="attach-row">${attachChip}</div>` : ""}
     <div class="composer glass">
       <textarea data-chat="input" placeholder="How can I help u today..?" rows="1"></textarea>
       <div class="c-row">
         ${ctxRingHTML(chat.ctx)}
         <button class="icon-glyph" data-act="snip" title="Snip a screen region">${SNIP_ICON}</button>
+        <button class="icon-glyph" data-act="attach" title="Attach a file">${ATTACH_ICON}</button>
         ${modelChip}
         ${think}
-        <button class="icon-glyph" data-act="attach" title="Attach a file">${ATTACH_ICON}</button>
         <button class="${sendClass}" ${sendAct}>${icon}</button>
       </div>
     </div>
@@ -1084,18 +1147,26 @@ async function doCrop(dataUrl, imgEl, r) {
 // ---------- tool executor (no-CDP) ----------
 // Confirmation gate — pause for a human OK before irreversible / destructive tool calls.
 // Lives in the extension so it survives the brain→extension fold. Autonomous runs
-// (scheduled tasks) set confirmGate=false to skip prompting.
+// (scheduled tasks) set confirmGate=false to skip prompting. The user can also flip
+// autoApprove (Security panel) to skip prompts for interactive runs — navigate never
+// prompts (it's reversible and the agent does it constantly, so asking was just noise).
 let confirmGate = true;
 function confirmMessage(name, a) {
   a = a || {};
   switch (name) {
-    case "navigate":      return "Navigate this tab to:\n" + (a.url || "(unknown url)");
     case "close_tab":     return "Close tab " + (a.tabId ?? "(active)") + "?";
     case "eval":          return "Run this JavaScript on the page?\n\n" + String(a.code || "").slice(0, 300);
     case "set_cookie":    return "Set cookie \"" + (a.name || "") + "\" on " + (a.url || a.domain || "this site") + "?";
     case "delete_cookie": return "Delete cookie \"" + (a.name || "") + "\"?";
     default:              return null;
   }
+}
+// Toggle the auto-approve setting (Security panel switch). Persists across reloads and
+// updates the runtime gate immediately. Scheduled runs force the gate off regardless.
+async function setAutoApprove(on) {
+  autoApprove = !!on;
+  if (!scheduledRun) confirmGate = !autoApprove;
+  try { await chrome.storage.local.set({ [AUTO_KEY]: autoApprove }); } catch {}
 }
 // Run one tool locally: confirmation gate → execute → update its activity card. Returns the result.
 // Shared by both the in-extension AgentCore path (onTool) and the legacy brain path.
@@ -1562,10 +1633,34 @@ root.addEventListener("click", async (e) => {
     return;
   }
   const t = e.target.closest("[data-act]");
+  // close any open glass-picker menu when clicking outside it (model + provider pickers)
+  const openMenu = root.querySelector(".gpick.open");
+  if (openMenu && !openMenu.contains(e.target)) openMenu.classList.remove("open");
   if (!t) return;
-  const { act, id, tab, idx, theme: th } = t.dataset;
+  const { act, id, tab, idx, theme: th, mid, pid } = t.dataset;
   switch (act) {
     case "logo": view = (view === "providers") ? "chat" : "providers"; render(); break;
+    case "model-menu":
+    case "prov-menu": { t.closest(".gpick").classList.toggle("open"); break; }
+    case "pick-model": {
+      const pick = t.closest(".gpick");
+      if (pick) pick.classList.remove("open");
+      state.activeModelId = mid;
+      persist();
+      render();
+      break;
+    }
+    case "pick-prov": {
+      const pick = t.closest(".gpick");
+      if (pick) pick.classList.remove("open");
+      if (!pid) break;
+      state.activeProviderId = pid;
+      const p = state.providers.find(x => x.id === pid);
+      if (!p || !p.models.find(m => m.id === state.activeModelId)) state.activeModelId = p && p.models[0] ? p.models[0].id : null;
+      persist();
+      render();
+      break;
+    }
     case "tasks-view": view = (view === "tasks") ? "chat" : "tasks"; taskEditing = null; render(); break;
     case "task-add": taskEditing = { id: "t_" + Math.random().toString(36).slice(2, 10), name: "", prompt: "", url: "", kind: "interval", every: 30, at: "09:00", enabled: true }; render(); break;
     case "task-edit": { const t2 = tasks.list.find(x => x.id === id); if (t2) { taskEditing = { ...t2 }; render(); } break; }
@@ -1636,6 +1731,14 @@ root.addEventListener("click", async (e) => {
     case "reveal-key": { const inp = root.querySelector('[data-f="apiKey"]'); if (inp) inp.type = inp.type === "password" ? "text" : "password"; break; }
     case "sec": secOpen = !secOpen; render(); break;
     case "sec-close": secOpen = false; render(); break;
+    case "auto-approve": {
+      await setAutoApprove(!autoApprove);
+      t.classList.toggle("on", autoApprove);
+      const lbl = t.querySelector(".tl"); if (lbl) lbl.textContent = autoApprove ? "ON" : "OFF";
+      const thumb = t.querySelector(".tthumb");
+      if (thumb) { thumb.classList.remove("gel"); void thumb.offsetWidth; thumb.classList.add("gel"); }
+      break;
+    }
     case "sec-enable": case "sec-change": { await enableOrChangeVault(); break; }
     case "sec-disable": { await disableVault(); break; }
     case "unlock": { await tryUnlock(); break; }
@@ -1694,8 +1797,7 @@ root.addEventListener("input", (e) => {
 });
 root.addEventListener("change", (e) => {
   const t = e.target;
-  if (t.dataset.act === "active") { const [pid, mid] = t.value.split("|"); state.activeProviderId = pid; state.activeModelId = mid; persist(); }
-  else if (t.dataset.act === "attach-input") { handleAttach(t); }
+  if (t.dataset.act === "attach-input") { handleAttach(t); }
   else if (t.dataset.act === "effort") { chat.effort = t.value; chrome.storage.local.set({ [EFFORT_KEY]: chat.effort }); }
 });
 root.addEventListener("keydown", (e) => {
@@ -1765,6 +1867,7 @@ async function closeRunnerWindow() {
 async function finalizeScheduledRun() {
   const name = scheduledRun.name, workTabId = scheduledRun.workTabId, runId = scheduledRun.id;
   scheduledRun = null;
+  confirmGate = !autoApprove;   // scheduled run forced it off; restore the user's setting
   const t = tasks.list.find(x => x.id === runId);
   if (t) { t.lastRun = Date.now(); t.lastStatus = schedError ? "error" : "ok"; await saveTasks(); }
   const lastA = [...chat.messages].reverse().find(m => m.role === "assistant");
@@ -1794,4 +1897,5 @@ mcpES.onmessage = async (ev) => {
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "local") return;
   if (changes[KEY]) { state = changes[KEY].newValue || state; if (!editing) render(); }
+  if (changes[AUTO_KEY]) { autoApprove = !!changes[AUTO_KEY].newValue; if (!scheduledRun) confirmGate = !autoApprove; if (secOpen) render(); }
 });

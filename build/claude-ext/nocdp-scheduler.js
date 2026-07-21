@@ -26,13 +26,22 @@ async function nocdpLaunchTask(id) {
   });
 }
 
-chrome.alarms.onAlarm.addListener(async (alarm) => {
-  if (!alarm.name.startsWith(NOCDP_TASK_PREFIX)) return;   // not ours (Anthropic bundle uses prompt_/retry_)
-  try { await nocdpLaunchTask(alarm.name.slice(NOCDP_TASK_PREFIX.length)); }
-  catch (e) {
-    try { chrome.notifications.create({ type: "basic", iconUrl: "/icon-128.png", title: "Scheduled task failed to launch", message: String(e && e.message || e) }); } catch (_) {}
-  }
-});
+// Scheduled-task alarm listener. Guarded: if the 'alarms' permission isn't active in the
+// installed copy (e.g. manifest.json wasn't reloaded after adding it), chrome.alarms is
+// undefined here — without the guard this throws an uncaught TypeError that breaks the
+// whole service worker. With the guard we degrade to "tasks won't auto-fire" + a clear
+// console warning instead of a crash.
+if (chrome.alarms && chrome.alarms.onAlarm) {
+  chrome.alarms.onAlarm.addListener(async (alarm) => {
+    if (!alarm.name.startsWith(NOCDP_TASK_PREFIX)) return;   // not ours (Anthropic bundle uses prompt_/retry_)
+    try { await nocdpLaunchTask(alarm.name.slice(NOCDP_TASK_PREFIX.length)); }
+    catch (e) {
+      try { chrome.notifications.create({ type: "basic", iconUrl: "/icon-128.png", title: "Scheduled task failed to launch", message: String(e && e.message || e) }); } catch (_) {}
+    }
+  });
+} else {
+  console.warn("[nocdp] chrome.alarms unavailable — scheduled tasks won't fire automatically. Reload the extension after ensuring 'alarms' is in manifest.json permissions.");
+}
 
 // "Run now" from the Tasks view (fires the same launch path as an alarm).
 chrome.runtime.onMessage.addListener((msg, sender, respond) => {
